@@ -1,0 +1,17 @@
+{
+  "lines": 100000,
+  "utf8_bytes": 5587514,
+  "python": "3.12.14",
+  "runs": 5,
+  "new": {
+    "index_seconds_median": 0.0809344389999751,
+    "candidate_records": 200,
+    "startup_seconds_median": 0.13982726299991555
+  },
+  "original": {
+    "index_seconds_median": 0.22493574400004945,
+    "candidate_records": 200,
+    "startup_seconds_median": 0.15867679699999826
+  },
+  "candidate_evidence_identical": true
+}

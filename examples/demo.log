@@ -1,0 +1,7 @@
+2026-01-01 10:00:00 [INFO] Demo data - synthetic example, not a device capture
+2026-01-01 10:00:01 [BLE] scan start, filters=RayNeo
+2026-01-01 10:00:02 [BLE] deviceRssi: -58
+2026-01-01 10:00:03 [RNLINK] BLE physical connect timeout
+2026-01-01 10:00:04 [INFO] retry scheduled
+2026-01-01 10:00:06 [BLE] authSuccess
+2026-01-01 10:00:07 [INFO] ConnectState.connected

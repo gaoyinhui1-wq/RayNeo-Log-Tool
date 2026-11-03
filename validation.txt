@@ -1,0 +1,38 @@
+test_archive_traversal_is_skipped (test_core.InputTests.test_archive_traversal_is_skipped) ... ok
+test_bad_archive_is_not_analyzed_as_text (test_core.InputTests.test_bad_archive_is_not_analyzed_as_text) ... ok
+test_cancel_is_propagated (test_core.InputTests.test_cancel_is_propagated) ... ok
+test_mixed_files_folders_archives (test_core.InputTests.test_mixed_files_folders_archives) ... ok
+test_nested_lz4_zip_and_authenticated_vlog (test_core.InputTests.test_nested_lz4_zip_and_authenticated_vlog) ... ok
+test_plain_compressed_text (test_core.InputTests.test_plain_compressed_text) ... ok
+test_same_head_tail_different_middle_are_not_duplicates (test_core.InputTests.test_same_head_tail_different_middle_are_not_duplicates) ... ok
+test_tar_gzip_bzip_and_xz (test_core.InputTests.test_tar_gzip_bzip_and_xz) ... ok
+test_utf16_and_gb18030 (test_core.InputTests.test_utf16_and_gb18030) ... ok
+test_ambiguous_state_is_not_transition (test_core.RuleTests.test_ambiguous_state_is_not_transition) ... ok
+test_conservative_regex_index_matches_real_line_semantics (test_core.RuleTests.test_conservative_regex_index_matches_real_line_semantics) ... ok
+test_count_threshold (test_core.RuleTests.test_count_threshold) ... ok
+test_direct_evidence_needs_no_timestamp (test_core.RuleTests.test_direct_evidence_needs_no_timestamp) ... ok
+test_disabled_external_rule_also_disables_same_name_builtin (test_core.RuleTests.test_disabled_external_rule_also_disables_same_name_builtin) ... ok
+test_earlier_same_timestamp_is_not_future_evidence (test_core.RuleTests.test_earlier_same_timestamp_is_not_future_evidence) ... ok
+test_inaccurate_hint_cannot_hide_regex (test_core.RuleTests.test_inaccurate_hint_cannot_hide_regex) ... ok
+test_index_without_native_accelerator_remains_correct (test_core.RuleTests.test_index_without_native_accelerator_remains_correct) ... ok
+test_invalid_regex_is_reported (test_core.RuleTests.test_invalid_regex_is_reported) ... ok
+test_normal_ibeacon_states_and_single_low_rssi_are_not_anomalies (test_core.RuleTests.test_normal_ibeacon_states_and_single_low_rssi_are_not_anomalies) ... ok
+test_range_edge_uses_recovery_outside_trigger_selection (test_core.RuleTests.test_range_edge_uses_recovery_outside_trigger_selection) ... ok
+test_required_terms_are_respected_by_fallback (test_core.RuleTests.test_required_terms_are_respected_by_fallback) ... ok
+test_rule_edit_invalidates_index (test_core.RuleTests.test_rule_edit_invalidates_index) ... ok
+test_state_search_is_indexed (test_core.RuleTests.test_state_search_is_indexed) ... ok
+test_timeout_incomplete_or_gapped_is_not_failure (test_core.RuleTests.test_timeout_incomplete_or_gapped_is_not_failure) ... ok
+test_timeout_recovery_and_normal_action (test_core.RuleTests.test_timeout_recovery_and_normal_action) ... ok
+test_timeout_uses_ordinary_heartbeat_coverage (test_core.RuleTests.test_timeout_uses_ordinary_heartbeat_coverage) ... ok
+test_unicode_lowercase_keeps_original_offsets (test_core.RuleTests.test_unicode_lowercase_keeps_original_offsets) ... ok
+test_mixed_picker_selection_accepts_folder_and_file (test_gui.GuiTests.test_mixed_picker_selection_accepts_folder_and_file) ... Fontconfig error: No writable cache directories
+This plugin does not support propagateSizeHints()
+ok
+test_open_preview_analyze_search_and_reuse (test_gui.GuiTests.test_open_preview_analyze_search_and_reuse) ... ok
+test_startup_does_not_load_analysis_or_optional_codecs (test_gui.GuiTests.test_startup_does_not_load_analysis_or_optional_codecs) ... ok
+test_visible_highlight_and_unicode_dont_crash (test_gui.GuiTests.test_visible_highlight_and_unicode_dont_crash) ... ok
+
+----------------------------------------------------------------------
+Ran 31 tests in 0.403s
+
+OK

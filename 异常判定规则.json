@@ -1,0 +1,421 @@
+{
+  "版本": 8,
+  "_维护说明": {
+    "使用方式": "直接编辑同目录的异常判定规则.json；EXE 首次运行会自动生成。修改后重新分析生效。",
+    "匹配规则": "异常日志数组为任意一条（OR）命中；同一行必须包含数组为全部（AND）满足；支持 re: 正则。",
+    "规则分类": "直接命中只放明确失败回调；短时失败用超时未恢复；普通状态切换不得直接定性为异常。",
+    "时间判定": "超时未恢复必须观察到完整窗口；观察范围不足，不下结论。若日志里出现恢复证据，排除持续失败。",
+    "自动关联": "BLEStatus:disconnect/connectFail 之后90秒未重新发起扫描/GATT连接，使用主程序独立状态机；不需配置重复关键词。",
+    "补充规则": "正则最好填写索引词以加快大日志分析；未填写时引擎仍会扫描并保持正确性。",
+    "补充场景": "增加 RNLink/SPP/ANCS/Find My/权限/GATT 的明确失败回调；无目标扫描结果、广播名称缺后缀、App 启动动画卡住等必须有状态机与对照证据，不能靠单个关键词报错。",
+    "兼容旧规则": "升级自动补齐缺少的新默认规则，但不覆盖用户已有规则；会保留升级前的 JSON 备份。"
+  },
+  "_JSON直接规则执行说明": {
+    "加载": "单文件EXE内置默认规则；外置JSON优先；文件损坏报明确错误，不会静默退回旧配置。",
+    "判定": "支持直接命中、超时未恢复、前后组合、多次出现、状态变化。明确失败≠硬件定责。",
+    "禁用": "规则设启用=false即可取消命中；不再由兜底补报重新加入。"
+  },
+  "_误报控制原则": {
+    "总原则": "关键字命中只代表发现候选证据，不代表一定是产品异常。需要前后时序/RSSI/状态机判断的问题由主流程二次确认；证据不足时不报异常。",
+    "弱信号": "单个低 RSSI 点不判异常。持续弱信号至少需要多个连续/邻近采样共同支持，并结合断链、回连、MFi、iBeacon 等链路结果判断。",
+    "iBeacon": "outside、inside、outside→inside、inside→outside 都属于可能正常的 Region 状态变化，单独出现永远不作为异常。outside→inside 只作为“重新进入有效范围/拉活触发点”。",
+    "MFi": "单次 MFI disconnect 不直接判硬件异常；需要结合 BLE/GATT、RSSI 和恢复结果。",
+    "疑似硬件": "只有持续弱 RSSI 与 BLE/GATT、MFi、iBeacon 多条链路在同一时段同时异常，且没有主动断开、关机、明显拉距等正常解释时，才允许输出“疑似蓝牙射频/硬件异常”。",
+    "证据不足": "日志结束、时间段缺失、只有单链路异常、只有一次低 RSSI、只有一次 iBeacon 状态变化时，都不升级为硬件问题。"
+  },
+  "_主流程高级判定注释": [
+    {
+      "名称": "BLE/GATT断开后90秒未恢复",
+      "函数": "detect_ble_gatt_no_rescan()",
+      "触发": "出现 BLEStatus:disconnect 或 BLEStatus:connectFail。",
+      "判定": "断开/失败后先作为候选，不立即报错。程序观察后续：90 秒内如果出现重新 scan、GATT 建连、authSuccess、connected/ANCS connected 等恢复证据，则不报“回连失败”；超过观察条件仍没有恢复动作才报。",
+      "排除": "主动断开、解绑、关机等正常操作会排除；App 很快回前台且随后正常恢复也不会简单按90秒误报。"
+    },
+    {
+      "名称": "后台自动回连持续失败，回前台才恢复",
+      "函数": "detect_persistent_reconnect_failures()",
+      "触发": "后台出现自动回连失败/超时。",
+      "判定": "如果长时间没有有效重试或恢复，而 App 回到前台后很快恢复连接，才判为后台自动回连持续失败。"
+    },
+    {
+      "名称": "iBeacon outside→inside 拉活状态机",
+      "函数": "detect_ibeacon_pullup_state_machine()",
+      "触发": "搜索 iBeacon state，状态从 outside 变化到 inside。",
+      "判定": "outside→inside 是正常触发条件，不限制两者间隔时间，也绝不因该状态变化本身报异常。进入 inside 后继续观察：出现拉活/scan/connect/authSuccess 等则正常；出现明确失败才报拉活失败；再次回到 outside 且中间完全没有任何拉活动作时，才可报“进入范围后未观察到拉活链路”；日志结束仍停在 inside 时证据不足，不报异常。",
+      "注意": "outside 不等于用户主动断开蓝牙，也不等于眼镜一定没有广播；inside/outside 只是手机侧 Region 判定。inside→outside、outside→inside 单独都可能是正常移动场景。当前 iBeacon 状态机不使用 RSSI 单独定性，RSSI 只作为辅助证据。手机侧 iBeacon/拉活异常不能直接等同于眼镜广播异常。"
+    },
+    {
+      "名称": "iBeacon后台唤醒链核实",
+      "函数": "detect_ibeacon_wake_gap_incidents()",
+      "触发": "结合较长时间前后的 iBeacon 状态、App cold start、launchOptions、定位授权等信息。",
+      "判定": "用于判断 App 是被 iBeacon/Location 事件拉起，还是用户点图标后才启动；证据不足时只给“待核实”，不会直接把问题定成眼镜无广播。"
+    },
+    {
+      "名称": "拉距/弱信号导致的断链过滤",
+      "函数": "suppress_transient_link_timeouts()",
+      "触发": "出现 Connection Timeout/物理链路断开候选。",
+      "判定": "结合断开前 RSSI、信号是否持续变弱、回来后的 RSSI 回升和恢复连接判断是否更符合拉距场景。当前核心阈值：明显弱信号约 <= -80 dBm；可能拉距从约 -70 dBm 开始参考；恢复后 RSSI 改善约 8 dB 以上会作为回到有效距离的重要证据。",
+      "注意": "不会再因为“后来恢复”就自动把真实断链异常过滤掉，必须有弱信号/信号回升证据。"
+    },
+    {
+      "名称": "MFi明确失败/建连失败二次判断",
+      "函数": "detect_ibeacon_mfi_incidents()",
+      "触发": "MFi/ExternalAccessory 出现明确 failed/failure/error/timeout，或发起 MFi 建连后长时间没有成功回调。",
+      "判定": "过滤重复错误和明显正常/已恢复场景；只有存在明确失败证据时才输出 MFi 异常。"
+    },
+    {
+      "名称": "App生命周期结束导致BLE主动断开",
+      "函数": "detect_cross_period_incidents()",
+      "触发": "App 进入后台/生命周期结束附近，同时 SDK 主动断开 BLE。",
+      "判定": "结合后续 cold start 和 BLE/MFi 恢复时间判断这次断开是否与 App 进程结束相关；不会只凭一条 disconnect 下结论。"
+    },
+    {
+      "名称": "问题时间对应版本/SDK取值",
+      "函数": "extract_device_info(files_content, reference_time=...)",
+      "触发": "日志包中同时存在升级前、升级后的 App/SDK/眼镜系统版本。",
+      "判定": "版本字段统一取整包日志中时间最新的有效记录；版本提取从日志尾部反向查找，避免升级前旧版本大量出现导致升级后的新版本被截断。眼镜系统版本与 small_core 视为同一版本来源，只展示“眼镜系统版本”一个字段。"
+    },
+    {
+      "名称": "持续弱信号 + 多链路异常 → 疑似射频/硬件问题",
+      "函数": "建议主流程实现：detect_suspected_rf_hardware_incident()",
+      "触发": "同一设备、同一连续时间段内出现持续偏弱 RSSI，同时伴随 BLE/GATT、MFi、iBeacon 多链路异常证据。",
+      "判定": "采用严格聚合判定，优先避免误报：①不能只看单个 RSSI 点，必须有持续/多次弱信号证据；②BLE/GATT 需出现超时、断链、建连失败或反复恢复失败；③MFi 需同期出现明确 disconnect/failed/timeout 等异常；④iBeacon 不能只看 outside/inside，必须出现进入范围后拉活失败、反复状态异常且无正常恢复，或其他明确 CoreLocation/iBeacon 失败证据。只有多项同时成立才输出“疑似蓝牙射频/硬件异常”。",
+      "排除": "主动断开、关闭蓝牙、解绑、眼镜关机/重启、明确拉距后 RSSI 变弱并在回来后恢复、日志不完整、只有单链路异常、只有一次低 RSSI、只有普通 outside/inside 状态变化，全部不升级为硬件问题。",
+      "输出建议": "问题名称：疑似蓝牙射频/硬件异常；问题说明：BLE 信号持续异常偏弱，并同时影响 BLE/GATT、MFi、iBeacon 多条链路，疑似天线、射频或硬件侧异常，建议结合近距离复测进一步确认。",
+      "注意": "这是“疑似”结论，不是硬件定责。仅靠软件日志无法直接证明天线/RF器件损坏。"
+    }
+  ],
+  "规则": [
+    {
+      "问题名称": "BLE加密连接失败",
+      "异常日志": [
+        "re:CBErrorDomain\\s+Code\\s*=\\s*15.{0,180}Failed to encrypt the connection",
+        "re:Failed to encrypt the connection.{0,180}CBErrorDomain\\s+Code\\s*=\\s*15"
+      ],
+      "问题说明": "BLE 加密连接失败，优先排查 Bond/LTK/安全上下文。",
+      "索引词": [
+        "CBErrorDomain Code=15",
+        "Failed to encrypt the connection"
+      ],
+      "级别": "HIGH"
+    },
+    {
+      "问题名称": "BLE连接流程超时",
+      "异常日志": [
+        "BLE physical connect timeout"
+      ],
+      "问题说明": "BLE 物理连接流程本身发生超时。",
+      "级别": "HIGH"
+    },
+    {
+      "问题名称": "BLE物理连接与SDK逻辑状态不一致",
+      "异常日志": [
+        "re:Physically connected\\s*&\\s*logically disconnected peripherals exist"
+      ],
+      "问题说明": "BLE 物理已连接，但 SDK 逻辑层仍处于未连接状态。",
+      "索引词": [
+        "Physically connected"
+      ],
+      "级别": "HIGH"
+    },
+    {
+      "问题名称": "相同Peripheral正在连接，新的连接请求被拒绝",
+      "异常日志": [
+        "re:A per with the same id.{0,180}is connecting.{0,180}New connections are not allowed to start"
+      ],
+      "问题说明": "同一 Peripheral 尚在 connecting 状态时又发起新的连接请求。",
+      "索引词": [
+        "New connections are not allowed to start"
+      ],
+      "级别": "HIGH"
+    },
+    {
+      "问题名称": "版本交换超时",
+      "异常日志": [
+        "sendMsg exchange version time out",
+        "眼镜回复版本交换信息超时"
+      ],
+      "问题说明": "BLE 建连后版本交换阶段未在预期时间内完成。",
+      "级别": "HIGH"
+    },
+    {
+      "问题名称": "设备信息交换超时",
+      "异常日志": [
+        "Device info exchange timeout"
+      ],
+      "问题说明": "BLE 建连后设备信息交换超时。",
+      "级别": "HIGH"
+    },
+    {
+      "问题名称": "配对过程中BLE断开",
+      "异常日志": [
+        "BLE disconnected during pairing"
+      ],
+      "问题说明": "配对流程中 BLE 链路异常断开。",
+      "级别": "HIGH"
+    },
+    {
+      "问题名称": "配对失败原因-BLE断开",
+      "异常日志": [
+        "re:pairing_failure_reason[\"\\']?\\s*[:=]\\s*[\"\\']?ble_disconnected"
+      ],
+      "问题说明": "配对失败原因明确记录为 BLE disconnected。",
+      "索引词": [
+        "pairing_failure_reason"
+      ],
+      "级别": "HIGH"
+    },
+    {
+      "问题名称": "App蓝牙整体连接失败",
+      "异常日志": [
+        "ConnectState.connectfailed"
+      ],
+      "问题说明": "App 报连接失败，完整观察90秒内未找到成功连接/鉴权回调。",
+      "判定逻辑": "超时未恢复",
+      "时间窗口秒": 90,
+      "恢复成功日志": [
+        "ConnectState.connected",
+        "BLEStatus:connected",
+        "BLEStatus:connectSuccess",
+        "authSuccess"
+      ],
+      "正常场景日志": [
+        "disconnectSource:app",
+        "unbond device",
+        "request shutdown",
+        "datasync poweroff"
+      ],
+      "级别": "HIGH"
+    },
+    {
+      "问题名称": "BLE鉴权超时或失败",
+      "异常日志": [
+        "Authentication timeout",
+        "re:(?:BLE|GATT|RNLink|auth|认证|鉴权).{0,75}authentication failed",
+        "re:(?:BLE|GATT|RNLink|auth|认证|鉴权).{0,75}auth failed"
+      ],
+      "问题说明": "BLE 建链后的鉴权阶段发生超时或失败。",
+      "索引词": [
+        "Authentication timeout",
+        "authentication failed",
+        "auth failed"
+      ],
+      "级别": "HIGH"
+    },
+    {
+      "问题名称": "自动回连扫描超时",
+      "异常日志": [
+        "auto_reconnect_timeout"
+      ],
+      "问题说明": "自动回连超时后完整观察90秒，未找到恢复成功证据。",
+      "判定逻辑": "超时未恢复",
+      "时间窗口秒": 90,
+      "恢复成功日志": [
+        "ConnectState.connected",
+        "BLEStatus:connected",
+        "BLEStatus:connectSuccess",
+        "authSuccess"
+      ],
+      "级别": "HIGH"
+    },
+    {
+      "问题名称": "Bond/LTK数据异常",
+      "异常日志": [
+        "Can't find enc key!"
+      ],
+      "问题说明": "蓝牙安全层未找到加密 Key/LTK。",
+      "正常场景日志": [
+        "unbond device",
+        "remove bond",
+        "disconnectSource:app"
+      ],
+      "级别": "HIGH"
+    },
+    {
+      "问题名称": "远端设备地址异常",
+      "异常日志": [
+        "re:find_remote_device.{0,100}found null addr"
+      ],
+      "问题说明": "蓝牙安全层无法找到对应远端设备地址；若两段文字出现在同一异常行，优先排查 Bond/地址映射。",
+      "索引词": [
+        "find_remote_device"
+      ],
+      "正常场景日志": [
+        "unbond device",
+        "remove bond"
+      ],
+      "级别": "HIGH"
+    },
+    {
+      "问题名称": "CoreBluetooth未知错误Code0",
+      "异常日志": [
+        "CBErrorDomain Code=0"
+      ],
+      "问题说明": "仅Code=0/Unknown不足以判断产品异常；默认停用，必要时检查原始回调上下文。",
+      "启用": false,
+      "级别": "HIGH"
+    },
+    {
+      "问题名称": "Android GATT 133异常",
+      "异常日志": [
+        "re:(?:onConnectionStateChange|onClientConnectionState|BluetoothGatt|GATT).{0,180}\\bstatus\\s*[:=]\\s*133\\b",
+        "re:\\bstatus\\s*[:=]\\s*133\\b.{0,180}(?:onConnectionStateChange|onClientConnectionState|BluetoothGatt|GATT)",
+        "re:BluetoothGatt.{0,100}\\bGATT_ERROR\\b"
+      ],
+      "问题说明": "Android GATT 连接/状态回调包含133或GATT_ERROR；单条失败不能直接定性根因。",
+      "索引词": [
+        "onConnectionStateChange",
+        "BluetoothGatt",
+        "GATT_ERROR"
+      ],
+      "级别": "MEDIUM"
+    },
+    {
+      "问题名称": "Android GATT建链超时",
+      "异常日志": [
+        "GATT_CONN_TIMEOUT",
+        "GATT_CONN_FAIL_ESTABLISH"
+      ],
+      "问题说明": "Android GATT 建链/回连阶段出现明确超时或建立失败。",
+      "级别": "HIGH"
+    },
+    {
+      "问题名称": "Android BLE扫描失败",
+      "异常日志": [
+        "re:onScanFailed.{0,100}(?:errorCode|code)\\s*[:=]?\\s*[1-9]\\d*",
+        "SCAN_FAILED_APPLICATION_REGISTRATION_FAILED",
+        "SCAN_FAILED_INTERNAL_ERROR",
+        "SCAN_FAILED_OUT_OF_HARDWARE_RESOURCES",
+        "SCAN_FAILED_SCANNING_TOO_FREQUENTLY"
+      ],
+      "问题说明": "Android BLE Scanner 返回扫描失败。",
+      "索引词": [
+        "onScanFailed",
+        "SCAN_FAILED_"
+      ],
+      "级别": "HIGH"
+    },
+    {
+      "问题名称": "iBeacon Region监控失败",
+      "异常日志": [
+        "monitoringDidFailFor",
+        "didFailRangingFor",
+        "re:(?:iBeacon|CLBeaconRegion|CoreLocation).{0,160}(?:monitoring|ranging|region).{0,80}(?:Fail|kCLErrorDomain)"
+      ],
+      "问题说明": "CoreLocation Region monitoring/ranging 有明确失败回调；不能据此判断眼镜没有发 iBeacon 广播或 BLE 断链。",
+      "索引词": [
+        "monitoringDidFailFor",
+        "didFailRangingFor",
+        "iBeacon"
+      ],
+      "级别": "MEDIUM"
+    },
+    {
+      "问题名称": "MFi连接明确失败",
+      "异常日志": [
+        "MFI connect failed",
+        "MFI connect timeout",
+        "MFI session error"
+      ],
+      "问题说明": "MFi 建连/Session 阶段出现明确失败或超时。",
+      "级别": "HIGH"
+    },
+    {
+      "问题名称": "BLE扫描超时",
+      "异常日志": [
+        "Scanning timeout"
+      ],
+      "问题说明": "扫描超时不代表目标设备一定可发现；必须结合广播、RSSI、扫描条件；默认不独立输出。",
+      "启用": false,
+      "级别": "HIGH"
+    },
+    {
+      "问题名称": "发现流程错误",
+      "异常日志": [
+        "RNDiscoverError"
+      ],
+      "问题说明": "RNDiscoverError 单独出现缺少具体失败码/目标设备上下文，默认不独立输出。",
+      "启用": false,
+      "级别": "HIGH"
+    },
+    {
+      "问题名称": "RNLink鉴权明确失败",
+      "异常日志": [
+        "re:(?:\\[RNLINK\\]|rnlink).{0,160}(?:auth(?:entication)?\\s*(?:fail|timeout)|鉴权失败|鉴权超时)"
+      ],
+      "索引词": [
+        "rnlink"
+      ],
+      "问题说明": "RNLink 鉴权失败或超时。"
+    },
+    {
+      "问题名称": "SPP连接或鉴权失败",
+      "异常日志": [
+        "re:(?:SPP|RFCOMM).{0,120}(?:connect(?:ion)?\\s*(?:failed|timeout)|auth(?:entication)?\\s*(?:failed|timeout)|connect fail|connect timeout|鉴权失败)"
+      ],
+      "索引词": [
+        "SPP",
+        "RFCOMM"
+      ],
+      "问题说明": "SPP/RFCOMM 建链或鉴权失败。"
+    },
+    {
+      "问题名称": "ANCS订阅或建链失败",
+      "异常日志": [
+        "re:\\bANCS\\b.{0,140}(?:connectFail|connect failed|subscribe failed|subscription failed|connection timeout|订阅失败|建链失败)"
+      ],
+      "索引词": [
+        "ANCS"
+      ],
+      "问题说明": "ANCS 建链或通知订阅明确失败。"
+    },
+    {
+      "问题名称": "Find My添加物品失败",
+      "异常日志": [
+        "re:(?:FindMy|Find My|FMCA).{0,140}(?:addAccessory|addItem|添加物品).{0,140}(?:failed|failure|errorCode\\s*[:=]\\s*[1-9]\\d*|失败)"
+      ],
+      "索引词": [
+        "FindMy",
+        "Find My",
+        "FMCA"
+      ],
+      "问题说明": "Find My 添加物品返回失败。"
+    },
+    {
+      "问题名称": "Find My播放声音失败",
+      "异常日志": [
+        "re:(?:FindMy|Find My|FMCA).{0,140}(?:playSound|播放声音).{0,100}(?:failed|failure|errorCode\\s*[:=]\\s*[1-9]\\d*|timeout|失败|超时)"
+      ],
+      "索引词": [
+        "FindMy",
+        "Find My",
+        "FMCA"
+      ],
+      "问题说明": "Find My 播放声音指令返回失败或超时。"
+    },
+    {
+      "问题名称": "蓝牙权限不足导致扫描失败",
+      "异常日志": [
+        "re:(?:BLUETOOTH_SCAN|bluetooth permission|CoreBluetooth|BluetoothAdapter).{0,160}(?:SecurityException|permission denied|not authorized|unauthorized|权限被拒绝)"
+      ],
+      "索引词": [
+        "BLUETOOTH_SCAN",
+        "permission denied",
+        "unauthorized",
+        "SecurityException"
+      ],
+      "问题说明": "手机蓝牙扫描权限被拒绝。"
+    },
+    {
+      "问题名称": "GATT服务发现失败",
+      "异常日志": [
+        "re:(?:didDiscoverServices|didDiscoverCharacteristicsFor).{0,160}(?:CBErrorDomain\\s+Code\\s*=\\s*[1-9]\\d*|failed|失败|timeout|超时)"
+      ],
+      "索引词": [
+        "didDiscoverServices",
+        "didDiscoverCharacteristicsFor"
+      ],
+      "问题说明": "BLE GATT 服务/特征发现失败。"
+    }
+  ]
+}

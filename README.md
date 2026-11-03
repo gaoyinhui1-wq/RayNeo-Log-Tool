@@ -1,0 +1,99 @@
+# RayNeo Log Tool
+
+基于你提供的 `RayNeo_Log_Tool.py` 和 `异常判定规则.json` 修改的桌面日志工具。采用轻量模块化项目：仍只有一个启动入口，不需要服务器、数据库或账号。原始上传文件与 ADClose 仓库均未修改。
+
+## Windows 启动
+
+1. 安装 **64 位 Python 3.10 或更新版本**，安装时勾选“Add Python to PATH”（推荐 3.12）。
+2. 将整个 ZIP 解压到一个普通可写目录，保留 `rayneo` 文件夹和 JSON。
+3. 首次双击 **`安装依赖.bat`**，等待安装完成；然后双击 **`start.bat`**。
+4. 后续直接双击 `start.bat`。首次安装需要联网，查看/解密/分析日志均在本地进行。
+
+也可以在项目目录的终端执行：
+
+```console
+python -m venv .venv
+.venv\Scripts\python -m pip install -r requirements.txt
+.venv\Scripts\python RayNeo_Log_Tool.py
+```
+
+Linux/macOS 使用对应虚拟环境的 `python` 安装依赖并运行入口；图形桌面需要本机 Qt 所需系统库。依赖版本是本次 Python 3.12 测试使用的版本，不是 Windows 平台兼容性保证。
+
+## 使用
+
+- **Ctrl+O / 打开日志**：直接打开一个文件选择器；选择普通文件、压缩包或文件夹，按“导入”。按住 Ctrl 可以混选文件与文件夹；双击文件夹仍是进入目录浏览。
+- 也可以把文件、文件夹和压缩包一起拖进主窗口。不再先询问“压缩包还是文件夹”。
+- 导入后先预览，按 **F5 / 开始分析** 执行分析。重复分析复用内容和索引缓存；规则修改后缓存自动失效。
+- **Ctrl+F** 查找，**Ctrl+Shift+F** 筛选；双击筛选结果或异常定位跳回原文。
+- **Ctrl+G** 聚焦行号输入，**Ctrl+E** 导出报告。解密导出功能仍在“工具”菜单。
+- “编辑异常规则”打开程序目录中的 JSON，保存后重新分析生效。日志行号、原文和 VS Code Light+ 日志颜色保持原有风格；外层菜单、按钮、标签采用简洁的 Notepad 风格。
+
+`examples/demo.log` 是随包提供的合成演示日志，可以用它快速试用界面；不是设备真实采集记录。
+
+## 支持的输入
+
+普通文本不限制扩展名，支持 UTF-8、UTF-16 和 GB18030；容器支持 ZIP、TAR、TAR.GZ/TGZ、TAR.BZ2、TAR.XZ、GZIP、BZ2、XZ、LZ4、VLOGA1 及这些格式的嵌套。自动识别内容；VLOGA1 保留原有 AES-GCM 认证。
+
+RAR、7z 未加入解码器，会提示先解压再导入文件夹；“所有文件”表示选择器不按扩展名隐藏文件，不表示任意二进制格式都能作为文本分析。导入失败详情在报告区显示，损坏压缩包不再冒充原始文本进入分析。
+
+## 主要修改
+
+- 原单文件拆为界面、显示、导入、规则、索引、诊断、设备信息、功能关联、报告及后台任务模块。
+- 启动界面不加载诊断引擎、加密、LZ4 或原生索引器；按需加载。去除未使用的导入，不再加载可选 QScintilla。
+- 日志仍只绘制可见行；预览的内容可供分析复用。切换导入后释放旧索引；后台任务结果完成 UI 更新前保持忙碌状态，避免旧结果覆盖新筛选。
+- 引入 Aho–Corasick 多关键词索引，缺少加速器时有标准库回退。正则必要字面量通过保守解析提取；不确定的表达式回退扫描，用户提供的索引词不能改变匹配结果。
+- 规则补报遵守“同一行必须包含”；自定义状态搜索进入索引；禁用的同名规则不再被内置规则补回。
+- 时间关联遵守时间与行顺序，不把同秒较早的日志当成后续证据。分析时间边缘的恢复上下文仍会检查。
+- “超时未恢复”要求完整观察窗口，并排除正常操作；默认相邻带时间日志最大间隔 **60 秒**，大空档不作为持续失败证据。可在对应 JSON 规则中设置正数 `"最大日志间隔秒": 60` 调整；日志本来很稀疏时，保守策略可能不输出该类问题。
+- 文件去重先快速筛选，再按完整内容哈希确认；不再丢掉头尾相同但中间不同的日志。
+- 修复 PyQt6 查找高亮坐标返回 tuple 引发的崩溃；修复原代码 PID 正则未定义。报告导出保留完整内容，不受界面显示长度上限影响。
+- 日志区维持水平滚动；原本不起作用的“自动换行”控件已去掉。没有引入需要全量排版的新控件。
+
+## 项目结构
+
+| 文件/模块 | 用途 |
+| --- | --- |
+| `RayNeo_Log_Tool.py` | 启动入口 |
+| `rayneo/app.py`, `window.py`, `dialogs.py`, `theme.py` | 应用、主窗口、统一导入窗口和主题 |
+| `rayneo/viewer.py`, `search.py`, `text.py` | 可见行绘制、搜索及行偏移 |
+| `rayneo/ingestion.py`, `background.py` | 文件收集、容器处理和预览/读取任务 |
+| `rayneo/rules.py`, `rule_engine.py` | 规则文件管理和五种 JSON 判定逻辑 |
+| `rayneo/indexing.py`, `records.py`, `timestamps.py` | 多关键词索引、缓存、观察范围和时间 |
+| `rayneo/analysis.py`, `analysis_worker.py` | 原有高级诊断与分析后台任务 |
+| `rayneo/device_info.py`, `features.py`, `reporting.py` | 设备信息、功能上下文和报告 |
+| `tests/`, `tools/benchmark.py` | 回归测试及可复现性能测试 |
+
+JSON 保留你上传的规则内容。本次重点修复执行逻辑，没有重新定义硬件定责标准，也没有伪造真实日志样本。
+
+## 验证与性能
+
+在 Linux、Python 3.12.14、PyQt6 6.12.0 的 `offscreen` 平台完成 **31 项 unittest 回归测试**，含真实 Qt 后台导入→预览→分析→重复分析→筛选流程、混合导入选择器、Unicode 高亮、加密认证、嵌套容器及规则误判边界。结果见 `validation.txt`。另通过 Python 编译检查和 Ruff 未定义名称检查。
+
+同一机器、5 次中位数、100,000 行 / 5,587,514 字节合成日志、相同启用规则：
+
+| 测试项 | 原版 | 修改版 |
+| --- | ---: | ---: |
+| 冷建候选索引 | 0.225 秒 | 0.081 秒 |
+| 新进程创建并离屏显示主窗口 | 0.159 秒 | 0.140 秒 |
+
+该场景两版都找到 200 条相同的候选原文。索引约快 2.8 倍；此结果不是全流程耗时或 Windows EXE 启动速度保证。第一次构建、冷磁盘、复杂正则、时间规则和实际日志分布都会影响耗时。详见 `benchmark-results.json`。
+
+运行测试：
+
+```console
+python -m unittest discover -s tests -v
+python tools/benchmark.py
+python tools/benchmark.py --baseline /path/to/original/RayNeo_Log_Tool.py
+```
+
+无图形桌面时设置 `QT_QPA_PLATFORM=offscreen`。纯解析测试可以单独运行 `python -m unittest discover -s tests -p test_core.py -v`。
+
+## Windows EXE（可选，尚未在 Windows 验证）
+
+在 Windows 安装完依赖后运行 `tools/build_windows.bat`，使用 PyInstaller 生成 `dist\RayNeo_Log_Tool\RayNeo_Log_Tool.exe`。脚本采用 **onedir**，避免 onefile 每次启动都解压 Qt 运行时；分发时须保留整个输出目录。当前下载包是源码项目，未附声称可运行的 Windows EXE。
+
+## 仍需实测的范围
+
+- 尚未收到真实误判日志，不能承诺已消除全部误判；本次通过的是针对已定位代码缺陷的回归测试。
+- 未在 Windows 实机测试原生字体、文件系统权限、桌面交互或 EXE 打包脚本。
+- JSON 的局部时间关联仍以单个文件为证据范围。跨文件、多设备的关联沿用原有高级诊断流程；文件轮转或多设备混合日志还需真实样本校验，未改造为完整的按设备分流状态机。
