@@ -50,6 +50,11 @@ ok
 test_open_preview_analyze_search_and_reuse (test_gui.GuiTests.test_open_preview_analyze_search_and_reuse) ... ok
 test_startup_does_not_load_analysis_or_optional_codecs (test_gui.GuiTests.test_startup_does_not_load_analysis_or_optional_codecs) ... ok
 test_visible_highlight_and_unicode_dont_crash (test_gui.GuiTests.test_visible_highlight_and_unicode_dont_crash) ... ok
+test_complete_source_copy_can_import_and_display_the_window (test_startup_installation.SourceInstallationTests.test_complete_source_copy_can_import_and_display_the_window) ... ok
+test_missing_matching_module_has_precise_recovery_message (test_startup_installation.SourceInstallationTests.test_missing_matching_module_has_precise_recovery_message) ... ok
+test_missing_package_is_not_loaded_from_the_original_checkout (test_startup_installation.SourceInstallationTests.test_missing_package_is_not_loaded_from_the_original_checkout) ... ok
+test_missing_result_delegate_has_precise_recovery_message (test_startup_installation.SourceInstallationTests.test_missing_result_delegate_has_precise_recovery_message) ... ok
+test_other_missing_dependencies_keep_their_original_traceback (test_startup_installation.SourceInstallationTests.test_other_missing_dependencies_keep_their_original_traceback) ... ok
 test_downloads_shortcut_preserves_default_places (test_ui_regressions.GuiRegressionTests.test_downloads_shortcut_preserves_default_places) ... ok
 test_empty_import_clears_old_preview (test_ui_regressions.GuiRegressionTests.test_empty_import_clears_old_preview) ... ok
 test_find_while_offsets_pending_uses_actual_text_line (test_ui_regressions.GuiRegressionTests.test_find_while_offsets_pending_uses_actual_text_line) ... ok
@@ -68,6 +73,6 @@ test_selection_drags_scroll_and_clear_on_file_switch (test_viewer_interaction.Se
 test_shift_arrows_click_select_all_and_copy (test_viewer_interaction.SelectionTests.test_shift_arrows_click_select_all_and_copy) ... ok
 
 ----------------------------------------------------------------------
-Ran 66 tests in 1.121s
+Ran 71 tests in 1.752s
 
 OK
