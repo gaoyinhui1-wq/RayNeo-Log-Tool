@@ -25,8 +25,27 @@ test_timeout_incomplete_or_gapped_is_not_failure (test_core.RuleTests.test_timeo
 test_timeout_recovery_and_normal_action (test_core.RuleTests.test_timeout_recovery_and_normal_action) ... ok
 test_timeout_uses_ordinary_heartbeat_coverage (test_core.RuleTests.test_timeout_uses_ordinary_heartbeat_coverage) ... ok
 test_unicode_lowercase_keeps_original_offsets (test_core.RuleTests.test_unicode_lowercase_keeps_original_offsets) ... ok
-test_mixed_picker_selection_accepts_folder_and_file (test_gui.GuiTests.test_mixed_picker_selection_accepts_folder_and_file) ... Fontconfig error: No writable cache directories
-This plugin does not support propagateSizeHints()
+test_clearing_input_or_button_removes_result_and_source_marks (test_filter_highlighting.FilterHighlightTests.test_clearing_input_or_button_removes_result_and_source_marks) ... Fontconfig error: No writable cache directories
+ok
+test_editing_query_does_not_change_completed_result_navigation (test_filter_highlighting.FilterHighlightTests.test_editing_query_does_not_change_completed_result_navigation) ... ok
+test_invalid_regex_clears_previous_results_and_keeps_controls_usable (test_filter_highlighting.FilterHighlightTests.test_invalid_regex_clears_previous_results_and_keeps_controls_usable) ... ok
+test_long_elided_rows_and_zero_width_markers_render_without_changing_raw (test_filter_highlighting.FilterHighlightTests.test_long_elided_rows_and_zero_width_markers_render_without_changing_raw) ... ok
+test_marking_never_reexecutes_regex_on_gui_paint_and_scroll (test_filter_highlighting.FilterHighlightTests.test_marking_never_reexecutes_regex_on_gui_paint_and_scroll) ... ok
+test_navigation_to_uncached_file_restores_marks_after_async_read (test_filter_highlighting.FilterHighlightTests.test_navigation_to_uncached_file_restores_marks_after_async_read) ... ok
+test_old_callback_after_clear_cannot_restore_marks (test_filter_highlighting.FilterHighlightTests.test_old_callback_after_clear_cannot_restore_marks) ... ok
+test_original_view_marks_all_hits_and_copies_exact_unicode (test_filter_highlighting.FilterHighlightTests.test_original_view_marks_all_hits_and_copies_exact_unicode) ... ok
+test_partial_regex_hit_survives_horizontal_clipping (test_filter_highlighting.FilterHighlightTests.test_partial_regex_hit_survives_horizontal_clipping) ... ok
+test_result_cells_render_highlights_even_when_selected (test_filter_highlighting.FilterHighlightTests.test_result_cells_render_highlights_even_when_selected) ... ok
+test_switching_file_restores_only_that_files_marks (test_filter_highlighting.FilterHighlightTests.test_switching_file_restores_only_that_files_marks) ... ok
+test_whole_scope_marks_and_regex_navigation_use_worker_spans (test_filter_highlighting.FilterHighlightTests.test_whole_scope_marks_and_regex_navigation_use_worker_spans) ... ok
+test_bad_regex_raises_without_old_marks (test_filter_highlighting.SpanTests.test_bad_regex_raises_without_old_marks) ... ok
+test_dense_matches_merge_but_navigation_keeps_first_match (test_filter_highlighting.SpanTests.test_dense_matches_merge_but_navigation_keeps_first_match) ... ok
+test_multiple_case_insensitive_hits_and_literal_regex_characters (test_filter_highlighting.SpanTests.test_multiple_case_insensitive_hits_and_literal_regex_characters) ... ok
+test_regex_and_unicode_positions_use_original_text (test_filter_highlighting.SpanTests.test_regex_and_unicode_positions_use_original_text) ... ok
+test_truncation_and_cancel_keep_parallel_metadata_consistent (test_filter_highlighting.SpanTests.test_truncation_and_cancel_keep_parallel_metadata_consistent) ... ok
+test_unicode_map_is_source_exact_and_skips_plain_text (test_filter_highlighting.SpanTests.test_unicode_map_is_source_exact_and_skips_plain_text) ... ok
+test_zero_width_regex_does_not_loop_or_color_entire_line (test_filter_highlighting.SpanTests.test_zero_width_regex_does_not_loop_or_color_entire_line) ... ok
+test_mixed_picker_selection_accepts_folder_and_file (test_gui.GuiTests.test_mixed_picker_selection_accepts_folder_and_file) ... This plugin does not support propagateSizeHints()
 ok
 test_open_preview_analyze_search_and_reuse (test_gui.GuiTests.test_open_preview_analyze_search_and_reuse) ... ok
 test_startup_does_not_load_analysis_or_optional_codecs (test_gui.GuiTests.test_startup_does_not_load_analysis_or_optional_codecs) ... ok
@@ -49,6 +68,6 @@ test_selection_drags_scroll_and_clear_on_file_switch (test_viewer_interaction.Se
 test_shift_arrows_click_select_all_and_copy (test_viewer_interaction.SelectionTests.test_shift_arrows_click_select_all_and_copy) ... ok
 
 ----------------------------------------------------------------------
-Ran 47 tests in 0.638s
+Ran 66 tests in 1.121s
 
 OK

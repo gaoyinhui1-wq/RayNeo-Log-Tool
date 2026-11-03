@@ -7,10 +7,17 @@ from PyQt6.QtGui import QColor
 from PyQt6.QtCore import QAbstractTableModel, QModelIndex
 from PyQt6.QtGui import QBrush
 from .ingestion import read_text_file
+from .matching import HighlightedRows, SearchSpec, match_spans
 
 
 def scan_log_matches(
-    data, query, regex=False, case_sensitive=False, max_results=25000, cancelled=None
+    data,
+    query,
+    regex=False,
+    case_sensitive=False,
+    max_results=25000,
+    cancelled=None,
+    include_spans=False,
 ):
     """Line-streaming search; only one pass, never builds a lowercased copy of all logs."""
     if not query:
@@ -20,7 +27,9 @@ def scan_log_matches(
         if regex or not case_sensitive
         else None
     )
-    matches = []
+    spec = SearchSpec(query, regex, case_sensitive)
+    highlight_pattern = spec.compile() if include_spans else None
+    matches = HighlightedRows(spec) if include_spans else []
     for path, content in data.items():
         if content is None:
             content = read_text_file(path)
@@ -36,6 +45,13 @@ def scan_log_matches(
             line = line.rstrip("\r\n")
             found = bool(pattern.search(line)) if pattern is not None else query in line
             if found:
+                if include_spans:
+                    try:
+                        spans = match_spans(highlight_pattern, line, cancelled)
+                    except InterruptedError:
+                        return matches, False
+                    matches.spans.append(spans)
+                    matches.first_matches.append(highlight_pattern.search(line).span())
                 matches.append((path, lineno, line))
                 if len(matches) >= max_results:
                     return matches, True
@@ -94,6 +110,7 @@ class MatchSearchThread(QThread):
                 self.regex,
                 self.case_sensitive,
                 cancelled=self.isInterruptionRequested,
+                include_spans=True,
             )
             self.completed.emit(rows, truncated)
         except Exception as ex:
@@ -105,14 +122,32 @@ class MatchResultModel(QAbstractTableModel):
         super().__init__(parent)
         self.rows = []
         self._name_cache = {}
+        self.search_spec = None
+        self.highlights = ()
+        self.first_matches = ()
 
     def set_rows(self, rows):
         self.beginResetModel()
         self.rows = rows
+        self.search_spec = getattr(rows, "spec", None)
+        self.highlights = tuple(getattr(rows, "spans", ()))
+        self.first_matches = tuple(getattr(rows, "first_matches", ()))
         self._name_cache = {
             p: os.path.basename(p) for p, *_ in rows[:: max(1, len(rows) // 2500)]
         }
         self.endResetModel()
+
+    def row_spans(self, row):
+        return self.highlights[row] if 0 <= row < len(self.highlights) else ()
+
+    def first_match(self, row):
+        return self.first_matches[row] if 0 <= row < len(self.first_matches) else None
+
+    def source_highlights(self):
+        by_file = {}
+        for (path, number, _raw), spans in zip(self.rows, self.highlights):
+            by_file.setdefault(path, {})[number - 1] = spans
+        return by_file
 
     def rowCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self.rows)

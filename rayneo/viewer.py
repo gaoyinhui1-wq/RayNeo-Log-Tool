@@ -23,6 +23,7 @@ from PyQt6.QtCore import QRect
 from PyQt6.QtGui import QKeySequence, QTextLayout, QTextOption
 from PyQt6.QtCore import QPointF
 from .text import _line_offsets
+from .matching import HIT_FOREGROUND, HIT_BACKGROUND, clipped_spans, utf16_index_map
 
 
 class NumberGutter(QWidget):
@@ -175,6 +176,7 @@ class VirtualLogViewer(QAbstractScrollArea):
         self._line = self._column = 0
         self._anchor = self._cursor = 0
         self._mark_col = self._mark_len = 0
+        self._filter_highlights = {}
         self._wrap = False
         self._dragging = False
         self._drag_pos = QPoint()
@@ -228,11 +230,20 @@ class VirtualLogViewer(QAbstractScrollArea):
         self._starts = offsets if offsets is not None else _line_offsets(self._log)
         self._line = self._column = self._mark_len = 0
         self._anchor = self._cursor = 0
+        self._filter_highlights = {}
         self.horizontalScrollBar().setValue(0)
         self.verticalScrollBar().setValue(0)
         self._resize_scrollbars()
         self.selectionChanged.emit()
         self.cursorPositionChanged.emit()
+        self.viewport().update()
+
+    def set_filter_highlights(self, highlights, clear_active=False):
+        self._filter_highlights = highlights or {}
+        if clear_active and self._mark_len:
+            self._anchor = self._cursor
+            self._mark_len = 0
+            self.selectionChanged.emit()
         self.viewport().update()
 
     def _visible_count(self):
@@ -296,13 +307,25 @@ class VirtualLogViewer(QAbstractScrollArea):
         layout.setTextOption(option)
         if highlight:
             ranges = []
-            astral = any(ord(ch) > 0xFFFF for ch in displayed)
+            utf16 = utf16_index_map(displayed)
             for a, b, ink in vscode_log_runs(displayed):
                 span = QTextLayout.FormatRange()
-                span.start = self._utf16_offset(displayed, a) if astral else a
-                end = self._utf16_offset(displayed, b) if astral else b
+                span.start = utf16[a] if utf16 is not None else a
+                end = utf16[b] if utf16 is not None else b
                 span.length = end - span.start
                 span.format.setForeground(self._ink_colors[ink])
+                ranges.append(span)
+            column = start - self._starts[row]
+            for a, b in clipped_spans(
+                self._filter_highlights.get(row, ()), column, column + len(displayed)
+            ):
+                if a == b:
+                    continue
+                span = QTextLayout.FormatRange()
+                span.start = utf16[a] if utf16 is not None else a
+                span.length = (utf16[b] if utf16 is not None else b) - span.start
+                span.format.setForeground(QColor(HIT_FOREGROUND))
+                span.format.setBackground(QColor(HIT_BACKGROUND))
                 ranges.append(span)
             layout.setFormats(ranges)
         layout.beginLayout()
@@ -418,18 +441,23 @@ class VirtualLogViewer(QAbstractScrollArea):
             start, displayed, layout, text_line = self._layout_for_line(
                 row, highlight=True
             )
-            astral = any(ord(ch) > 0xFFFF for ch in displayed)
+            utf16 = utf16_index_map(displayed)
             if not text_line.isValid():
                 continue
             # All non-token text must use the body color. Previously QTextLayout
             # inherited the last gutter-number pen, making body text look gray.
             a, b = max(start, selected_start), min(start + len(displayed), selected_end)
+            selections = []
             if a < b:
-                ua = self._utf16_offset(displayed, a - start) if astral else a - start
-                ub = self._utf16_offset(displayed, b - start) if astral else b - start
+                ua = utf16[a - start] if utf16 is not None else a - start
+                ub = utf16[b - start] if utf16 is not None else b - start
                 left = text_left + text_line.cursorToX(ua)[0]
                 right = text_left + text_line.cursorToX(ub)[0]
                 color = "#F3DFA6" if self._mark_len else "#D5E5F5"
+                active = QTextLayout.FormatRange()
+                active.start, active.length = ua, ub - ua
+                active.format.setBackground(QColor(color))
+                selections.append(active)
                 painter.fillRect(
                     QRect(
                         int(min(left, right)),
@@ -454,7 +482,15 @@ class VirtualLogViewer(QAbstractScrollArea):
             painter.save()
             painter.setClipRect(gutter + 1, y, width, self._lh)
             painter.setPen(self._ink_colors[0])
-            layout.draw(painter, QPointF(text_left, y + 1))
+            layout.draw(painter, QPointF(text_left, y + 1), selections)
+            column = start - self._starts[row]
+            for a, b in clipped_spans(
+                self._filter_highlights.get(row, ()), column, column + len(displayed)
+            ):
+                if a == b:
+                    offset = utf16[a] if utf16 is not None else a
+                    x = int(text_left + text_line.cursorToX(offset)[0])
+                    painter.fillRect(x, y + 2, 2, self._lh - 3, QColor(HIT_FOREGROUND))
             if (
                 self.hasFocus()
                 and not self.has_selection()
@@ -462,8 +498,8 @@ class VirtualLogViewer(QAbstractScrollArea):
                 and start <= self._cursor <= start + len(displayed)
             ):
                 offset = (
-                    self._utf16_offset(displayed, self._cursor - start)
-                    if astral
+                    utf16[self._cursor - start]
+                    if utf16 is not None
                     else self._cursor - start
                 )
                 x = int(text_left + text_line.cursorToX(offset)[0])

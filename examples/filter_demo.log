@@ -1,0 +1,6 @@
+2026-01-01 10:00:00 [INFO] Synthetic filter demo - not a device capture
+2026-01-01 10:00:01 [BLE] device=demo state=disconnected reason=disconnect retry=0
+2026-01-01 10:00:02 [BLE] pending_timer_ble_disconnected then DISCONNECT
+2026-01-01 10:00:03 [INFO] device=demo connected
+2026-01-01 10:00:04 [BLE] 中文示例 😀 disconnect and disconnect
+2026-01-01 10:00:05 [INFO] device=demo disconnected desired=false

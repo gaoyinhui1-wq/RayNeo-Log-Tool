@@ -42,6 +42,8 @@ from .dialogs import InputDialog
 from .background import DecryptExportThread, FileReadThread, PreviewOpenThread
 from .rules import open_rules_file
 from .search import FindNextThread, MatchResultModel, MatchSearchThread
+from .matching import SearchSpec
+from .result_delegate import MatchHighlightDelegate
 from .viewer import VSCodeReportHighlighter, VirtualLogViewer
 
 
@@ -107,6 +109,7 @@ class AppWindow(QMainWindow):
         self.find_key = None
         self.find_offset = 0
         self._search_generation = 0
+        self._filter_highlights_by_file = {}
         self._closing = False
         self._files_are_prepared = False
         self.ui_font = QFont("Segoe UI", 9)
@@ -334,6 +337,10 @@ class AppWindow(QMainWindow):
         self.btn_filter = QPushButton("筛选全部")
         self.btn_filter.clicked.connect(self.filter_all)
         sl.addWidget(self.btn_filter)
+        self.btn_clear_filter = QPushButton("清除筛选")
+        self.btn_clear_filter.setToolTip("清空筛选结果和标记，保留输入条件")
+        self.btn_clear_filter.clicked.connect(self.clear_filter_results)
+        sl.addWidget(self.btn_clear_filter)
         bclose = QPushButton("×")
         bclose.setFixedWidth(28)
         bclose.clicked.connect(self.search_box.hide)
@@ -408,6 +415,9 @@ class AppWindow(QMainWindow):
         self.tbl_matches.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.match_model = MatchResultModel(self)
         self.tbl_matches.setModel(self.match_model)
+        self.tbl_matches.setItemDelegateForColumn(
+            2, MatchHighlightDelegate(self.tbl_matches)
+        )
         self.tbl_matches.setColumnWidth(0, 210)
         self.tbl_matches.setColumnWidth(1, 75)
         self.tbl_matches.horizontalHeader().setStretchLastSection(True)
@@ -428,6 +438,7 @@ class AppWindow(QMainWindow):
         self.hsplit.setSizes([162, 850])
         layout.addWidget(self.hsplit, 1)
         self.statusBar().setSizeGripEnabled(True)
+        self.search_input.textChanged.connect(self._search_text_changed)
 
     def styles(self):
         from .theme import NOTEPAD_STYLE
@@ -580,6 +591,7 @@ class AppWindow(QMainWindow):
             self.lbl_status.setText("打开失败")
             QMessageBox.warning(self, "打开失败", result["error"])
             return
+        self.clear_filter_results()
         if result.get("tempdir"):
             self._temp_dirs.add(result["tempdir"])
         self._import_notes = list(result.get("notes", []))
@@ -678,9 +690,7 @@ class AppWindow(QMainWindow):
                 while len(self.raw_data) > 3:
                     self.raw_data.popitem(last=False)
         if path == self.current_file:
-            self.viewer.set_log_text(
-                text if text is not None else "文件无法作为文本读取", offsets=offsets
-            )
+            self._display_log_text(path, text, offsets)
             self.viewer.goto(0)
             self.lbl_total.setText(
                 f"{self.viewer.line_count():,} 行  |  {(len(text) if text else 0) / 1024 / 1024:.1f} MB"
@@ -701,6 +711,15 @@ class AppWindow(QMainWindow):
         # A cached string may still lack line offsets (e.g. after analysis).
         if next_path and next_path in self.file_list_data:
             self._start_file_read(next_path)
+
+    def _display_log_text(self, path, text, offsets=None):
+        self.viewer.set_log_text(
+            text if text is not None else "文件无法作为文本读取", offsets
+        )
+        if text is not None:
+            self.viewer.set_filter_highlights(
+                self._filter_highlights_by_file.get(path, {})
+            )
 
     def _busy(self):
         return (
@@ -780,6 +799,7 @@ class AppWindow(QMainWindow):
             self.lbl_status.setText("分析失败")
             QMessageBox.warning(self, "分析失败", str(data["error"]))
             return
+        self.clear_filter_results()
         # Avoid destroying/reconstructing the editor until the worker is finished.
         if data.get("preprocess_dir"):
             self._temp_dirs.add(data["preprocess_dir"])
@@ -917,8 +937,8 @@ class AppWindow(QMainWindow):
             self.find_key = None
             self.current_file = path
             if path in self.raw_data and path in self._line_index_cache:
-                self.viewer.set_log_text(
-                    self.raw_data[path], self._line_index_cache[path]
+                self._display_log_text(
+                    path, self.raw_data[path], self._line_index_cache[path]
                 )
                 self.viewer.goto(0)
                 self._line_index_cache.move_to_end(path)
@@ -1052,6 +1072,7 @@ class AppWindow(QMainWindow):
             data = {self.current_file: self.raw_data.get(self.current_file)}
         else:
             data = {p: self.raw_data.get(p) for p in self.file_list_data}
+        self.clear_filter_results()
         self.btn_filter.setEnabled(False)
         self.results.setCurrentIndex(2)
         self.results.show()
@@ -1076,9 +1097,38 @@ class AppWindow(QMainWindow):
         )
         worker.start()
 
+    def _search_text_changed(self, text):
+        self._find_generation += 1
+        self.find_key = None
+        self.find_offset = 0
+        if not text:
+            self.clear_filter_results()
+
+    def clear_filter_results(self):
+        self._search_generation += 1
+        self._find_generation += 1
+        if self.search_worker and self.search_worker.isRunning():
+            self.search_worker.requestInterruption()
+        self._filter_highlights_by_file = {}
+        self.match_model.set_rows([])
+        self.viewer.set_filter_highlights({}, clear_active=True)
+        self.results.setTabText(2, "筛选结果 (0)")
+        self.results.setTabToolTip(2, "")
+        self.btn_filter.setEnabled(True)
+
     def search_finished(self, rows, truncated):
         self.btn_filter.setEnabled(True)
         self.match_model.set_rows(rows)
+        self._filter_highlights_by_file = self.match_model.source_highlights()
+        highlights = (
+            self._filter_highlights_by_file.get(self.current_file, {})
+            if self.current_file in self._line_index_cache
+            and self._pending_selected_path != self.current_file
+            else {}
+        )
+        self.viewer.set_filter_highlights(highlights)
+        spec = self.match_model.search_spec
+        self.results.setTabToolTip(2, "筛选条件：" + spec.query if spec else "")
         label = f"筛选结果 ({len(rows):,}" + ("，已达到上限)" if truncated else ")")
         self.results.setTabText(2, label)
         self.results.setCurrentIndex(2)
@@ -1097,32 +1147,25 @@ class AppWindow(QMainWindow):
         QMessageBox.warning(self, "筛选失败", error)
 
     def match_clicked(self, index):
-        if index.isValid() and 0 <= index.row() < len(self.match_model.rows):
-            path, lineno, raw = self.match_model.rows[index.row()]
-            term = self.search_input.text()
-            pos = 0
-            length = 0
+        if not index.isValid() or not 0 <= index.row() < len(self.match_model.rows):
+            return
+        path, lineno, raw = self.match_model.rows[index.row()]
+        hit = self.match_model.first_match(index.row())
+        if hit is None and self.match_model.search_spec is None:
+            # Compatibility with programmatically supplied rows; real filter
+            # results already carry worker-computed source offsets.
             try:
-                if self.search_regex.isChecked():
-                    m = re.search(
-                        term, raw, 0 if self.search_case.isChecked() else re.I
-                    )
-                    if m:
-                        pos = m.start()
-                        length = m.end() - m.start()
-                else:
-                    if self.search_case.isChecked():
-                        pos, length = raw.find(term), len(term)
-                    else:
-                        match = re.search(re.escape(term), raw, re.I)
-                        pos, length = (
-                            (match.start(), match.end() - match.start())
-                            if match
-                            else (-1, 0)
-                        )
+                pattern = SearchSpec(
+                    self.search_input.text(),
+                    self.search_regex.isChecked(),
+                    self.search_case.isChecked(),
+                ).compile()
+                match = pattern.search(raw) if self.search_input.text() else None
+                hit = match.span() if match else None
             except re.error:
-                pass
-            self.goto(path, lineno - 1, max(0, pos), length if pos >= 0 else 0)
+                hit = None
+        pos, end = hit if hit is not None else (0, 0)
+        self.goto(path, lineno - 1, pos, end - pos)
 
     def incident_clicked(self, index):
         if index.isValid() and 0 <= index.row() < len(self.incident_rows):
