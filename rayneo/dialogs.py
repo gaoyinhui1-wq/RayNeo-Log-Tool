@@ -2,6 +2,24 @@
 
 from pathlib import Path
 from PyQt6.QtWidgets import QFileDialog, QListView, QTreeView, QAbstractItemView
+from PyQt6.QtCore import QStandardPaths, QUrl
+
+
+def add_downloads_shortcut(dialog):
+    """Keep Qt's places, adding the OS Downloads path (including redirected paths)."""
+    locations = QStandardPaths.standardLocations(
+        QStandardPaths.StandardLocation.DownloadLocation
+    )
+    locations.append(str(Path.home() / "Downloads"))
+    urls = dialog.sidebarUrls()
+    known = {url.toString() for url in urls}
+    for path in locations:
+        if path and Path(path).is_dir():
+            url = QUrl.fromLocalFile(str(Path(path).resolve()))
+            if url.toString() not in known:
+                urls.append(url)
+                known.add(url.toString())
+    dialog.setSidebarUrls(urls)
 
 
 class InputDialog(QFileDialog):
@@ -13,6 +31,7 @@ class InputDialog(QFileDialog):
         self.setNameFilter("所有文件 (*)")
         self.setLabelText(QFileDialog.DialogLabel.Accept, "导入")
         self.resize(720, 460)
+        add_downloads_shortcut(self)
         for kind in (QListView, QTreeView):
             for view in self.findChildren(kind):
                 if view.objectName() in ("listView", "treeView"):

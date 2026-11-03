@@ -188,6 +188,12 @@ class AppWindow(QMainWindow):
         self.btn_open.setObjectName("OpenButton")
         self.btn_analyze = add_btn("▶ 开始分析", self.reanalyze, "F5 启动异常分析")
         self.btn_analyze.setObjectName("AnalyzeButton")
+        self.btn_decrypt = add_btn(
+            "本地解密 / 解压",
+            self.open_decrypt_dialog,
+            "选择本地日志文件或文件夹，解密/解压到指定目录（Ctrl+Shift+D）",
+        )
+        self.btn_decrypt.setObjectName("DecryptButton")
         self.has_analyzed = False
         self.btn_find = add_btn("查找", self.show_find, "Ctrl+F")
         self.btn_find.setObjectName("SearchButton")
@@ -546,13 +552,13 @@ class AppWindow(QMainWindow):
             self.start_preview(folder, False)
 
     def start_preview(self, paths, is_file_list):
+        if self._busy():
+            self.statusBar().showMessage("已有打开或分析任务正在运行")
+            return
         self._search_generation += 1
         self._find_generation += 1
         if self.search_worker and self.search_worker.isRunning():
             self.search_worker.requestInterruption()
-        if self._busy() or (self.preview_worker and self.preview_worker.isRunning()):
-            self.statusBar().showMessage("已有打开或分析任务正在运行")
-            return
         self._input_generation += 1
         self.last_open_paths = paths
         self.last_is_file_list = is_file_list
@@ -587,6 +593,8 @@ class AppWindow(QMainWindow):
         self._line_index_cache.clear()
         self.incidents = []
         self.current_file = None
+        self.viewer.set_log_text("")
+        self.lbl_total.setText("0 行")
         self._pending_selected_path = None
         self._pending_goto = None
         self.list_files.blockSignals(True)
@@ -596,6 +604,8 @@ class AppWindow(QMainWindow):
             self.tabs.removeTab(0)
         self._tab_paths = []
         self.list_files.addItems([Path(path).name for path in self.file_list_data])
+        for row, path in enumerate(self.file_list_data):
+            self.list_files.item(row).setToolTip(path)
         self.has_analyzed = False
         self._full_report = ""
         self.btn_analyze.setText("▶ 开始分析")
@@ -632,14 +642,20 @@ class AppWindow(QMainWindow):
 
     def _start_file_read(self, path):
         self._pending_selected_path = path
-        if self.file_read_worker and self.file_read_worker.isRunning():
+        # Keep the worker until its queued finished callback is handled, even
+        # when isRunning() has just become False. Otherwise an old callback
+        # could clear a newly started worker.
+        if self.file_read_worker is not None:
             return
         self.file_read_worker = FileReadThread(path, self.raw_data.get(path))
+        worker = self.file_read_worker
         generation = self._input_generation
         self.file_read_worker.completed.connect(
             lambda p, data: self._file_read_done(p, data, generation)
         )
-        self.file_read_worker.finished.connect(self._file_read_check_pending)
+        self.file_read_worker.finished.connect(
+            lambda: self._file_read_check_pending(worker)
+        )
         self.file_read_worker.start()
 
     def _file_read_done(self, path, payload, generation=None):
@@ -677,10 +693,13 @@ class AppWindow(QMainWindow):
             self._pending_selected_path if self._pending_selected_path != path else None
         )
 
-    def _file_read_check_pending(self):
+    def _file_read_check_pending(self, worker):
+        if self.file_read_worker is not worker:
+            return
         self.file_read_worker = None
         next_path = self._pending_selected_path
-        if next_path and next_path not in self.raw_data:
+        # A cached string may still lack line offsets (e.g. after analysis).
+        if next_path and next_path in self.file_list_data:
             self._start_file_read(next_path)
 
     def _busy(self):
@@ -799,6 +818,7 @@ class AppWindow(QMainWindow):
         )
         # 虚拟化标签：只保留最近打开的 24 个，不给每个日志创建 Qt Tab。
         for i, p in enumerate(self.file_list_data):
+            self.list_files.item(i).setToolTip(p)
             if count[p]:
                 self.list_files.item(i).setForeground(QColor("#CF222E"))
         self.tabs.blockSignals(False)
@@ -922,6 +942,7 @@ class AppWindow(QMainWindow):
                 self.tabs.removeTab(0)
             self._tab_paths.append(path)
             self.tabs.addTab(Path(path).name)
+            self.tabs.setTabToolTip(self.tabs.count() - 1, path)
         self.tabs.setCurrentIndex(self._tab_paths.index(path))
         self.list_files.blockSignals(False)
         self.tabs.blockSignals(False)
@@ -1007,8 +1028,13 @@ class AppWindow(QMainWindow):
             self.statusBar().showMessage(f"没有找到：{self.search_input.text()}")
             return
         self.find_offset = pos + max(1, length)
-        lineno = bisect_right(self.viewer._starts, pos) - 1
         text = self.raw_data[path]
+        offsets = self._line_index_cache.get(path)
+        lineno = (
+            bisect_right(offsets, pos) - 1
+            if offsets is not None
+            else text.count("\n", 0, pos)
+        )
         col = pos - (text.rfind("\n", 0, pos) + 1)
         self.goto(path, lineno, col, length)
         self.statusBar().showMessage(f"命中：第 {lineno + 1:,} 行")
@@ -1085,10 +1111,15 @@ class AppWindow(QMainWindow):
                         pos = m.start()
                         length = m.end() - m.start()
                 else:
-                    pos = (
-                        raw if self.search_case.isChecked() else raw.casefold()
-                    ).find(term if self.search_case.isChecked() else term.casefold())
-                    length = len(term)
+                    if self.search_case.isChecked():
+                        pos, length = raw.find(term), len(term)
+                    else:
+                        match = re.search(re.escape(term), raw, re.I)
+                        pos, length = (
+                            (match.start(), match.end() - match.start())
+                            if match
+                            else (-1, 0)
+                        )
             except re.error:
                 pass
             self.goto(path, lineno - 1, max(0, pos), length if pos >= 0 else 0)

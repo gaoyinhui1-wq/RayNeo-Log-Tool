@@ -1,9 +1,16 @@
 # -*- coding: utf-8 -*-
 import re
+from bisect import bisect_right
 from array import array
 from functools import lru_cache
-from PyQt6.QtWidgets import QApplication, QWidget, QPlainTextEdit, QAbstractScrollArea
-from PyQt6.QtCore import Qt, pyqtSignal, QSize
+from PyQt6.QtWidgets import (
+    QApplication,
+    QWidget,
+    QPlainTextEdit,
+    QAbstractScrollArea,
+    QMenu,
+)
+from PyQt6.QtCore import Qt, pyqtSignal, QSize, QTimer, QPoint
 from PyQt6.QtGui import (
     QFont,
     QColor,
@@ -54,15 +61,15 @@ class NumberGutter(QWidget):
 
 
 VS_LOG_INKS = (
-    "#24292F",
-    "#1A7F37",
-    "#8250DF",
-    "#0550AE",
-    "#0A3069",
-    "#0969DA",
-    "#1A7F37",
-    "#9A6700",
-    "#CF222E",
+    "#202733",
+    "#335A50",
+    "#604179",
+    "#244E73",
+    "#3B536B",
+    "#375C8F",
+    "#26633F",
+    "#865C19",
+    "#A12A32",
 )
 
 
@@ -156,19 +163,24 @@ class VSCodeReportHighlighter(QSyntaxHighlighter):
 
 
 class VirtualLogViewer(QAbstractScrollArea):
-    """仅绘制可见日志行；纵向滚动条表示整份日志，没有分页，也不生成百万个 Qt 块。"""
+    """Render visible rows and keep selections as source offsets, without a document."""
 
     cursorPositionChanged = pyqtSignal()
+    selectionChanged = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._log = ""
         self._starts = array("I", [0])
-        self._line = 0
-        self._column = 0
-        self._mark_col = 0
-        self._mark_len = 0
+        self._line = self._column = 0
+        self._anchor = self._cursor = 0
+        self._mark_col = self._mark_len = 0
         self._wrap = False
+        self._dragging = False
+        self._drag_pos = QPoint()
+        self._drag_timer = QTimer(self)
+        self._drag_timer.setInterval(40)
+        self._drag_timer.timeout.connect(self._autoscroll_selection)
         self._font = QFont("Consolas", 9)
         self._font.setStyleHint(QFont.StyleHint.Monospace)
         self._font.setFixedPitch(True)
@@ -180,8 +192,9 @@ class VirtualLogViewer(QAbstractScrollArea):
         self.viewport().setAutoFillBackground(False)
         self.viewport().setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
         self.viewport().setStyleSheet("background:#FFFFFF;")
+        self.viewport().setCursor(Qt.CursorShape.IBeamCursor)
         self._ink_colors = tuple(QColor(value) for value in VS_LOG_INKS)
-        self.verticalScrollBar().valueChanged.connect(self.viewport().update)
+        self.verticalScrollBar().valueChanged.connect(self._vertical_changed)
         self.horizontalScrollBar().valueChanged.connect(self.viewport().update)
         self._metrics()
         self._resize_scrollbars()
@@ -191,247 +204,453 @@ class VirtualLogViewer(QAbstractScrollArea):
         self._lh = max(19, fm.lineSpacing() + 4)
         self._cw = max(5, fm.horizontalAdvance("0"))
 
+    def _gutter_width(self):
+        return max(54, max(5, len(str(self.line_count()))) * self._cw + 15)
+
     def line_count(self):
         return len(self._starts)
 
+    def _line_end(self, line):
+        end = self._starts[line + 1] if line + 1 < self.line_count() else len(self._log)
+        while end > self._starts[line] and self._log[end - 1] in "\r\n":
+            end -= 1
+        return end
+
+    def _get_line(self, line):
+        if line < 0 or line >= self.line_count():
+            return ""
+        return self._log[self._starts[line] : self._line_end(line)]
+
     def set_log_text(self, value, offsets=None):
+        self._dragging = False
+        self._drag_timer.stop()
         self._log = value or ""
         self._starts = offsets if offsets is not None else _line_offsets(self._log)
         self._line = self._column = self._mark_len = 0
+        self._anchor = self._cursor = 0
         self.horizontalScrollBar().setValue(0)
         self.verticalScrollBar().setValue(0)
         self._resize_scrollbars()
+        self.selectionChanged.emit()
+        self.cursorPositionChanged.emit()
         self.viewport().update()
 
     def _visible_count(self):
         return max(1, self.viewport().height() // self._lh)
+
+    def _vertical_changed(self):
+        self._resize_horizontal()
+        self.viewport().update()
+
+    def _resize_horizontal(self):
+        # Only inspect visible rows and the caret row. Long rows are no longer
+        # limited to the old fixed 1,000-character horizontal range.
+        top = self.verticalScrollBar().value()
+        visible = range(top, min(self.line_count(), top + self._visible_count() + 1))
+        longest = max((self._line_end(i) - self._starts[i] for i in visible), default=0)
+        longest = max(longest, self._line_end(self._line) - self._starts[self._line])
+        bar = self.horizontalScrollBar()
+        page = max(1, (self.viewport().width() - self._gutter_width() - 9) // self._cw)
+        bar.setPageStep(page)
+        bar.setSingleStep(5)
+        # Reserve half a viewport for wide CJK glyphs; offsets remain code points.
+        bar.setRange(0, max(0, longest - max(1, page // 2)))
 
     def _resize_scrollbars(self):
         visible = self._visible_count()
         bar = self.verticalScrollBar()
         bar.setPageStep(visible)
         bar.setSingleStep(1)
-        bar.setRange(0, max(0, len(self._starts) - visible))
-        hb = self.horizontalScrollBar()
-        hb.setPageStep(max(1, self.viewport().width() // self._cw))
-        hb.setSingleStep(5)
-        # 水平滚动长度按当前可见长行动态扩展，不遍历整份文件。
-        hb.setRange(0, max(0, 1000 - hb.pageStep()))
+        bar.setRange(0, max(0, self.line_count() - visible))
+        self._resize_horizontal()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._resize_scrollbars()
 
-    def _get_line(self, i):
-        if i < 0 or i >= len(self._starts):
-            return ""
-        start = self._starts[i]
-        end = self._starts[i + 1] if i + 1 < len(self._starts) else len(self._log)
-        return self._log[start:end].rstrip("\n\r")
+    @staticmethod
+    def _utf16_offset(text, position):
+        return len(text[:position].encode("utf-16-le")) // 2
+
+    @staticmethod
+    def _python_offset(text, position):
+        return len(
+            text.encode("utf-16-le")[: position * 2].decode(
+                "utf-16-le", errors="ignore"
+            )
+        )
+
+    def _layout_for_line(self, row, highlight=False):
+        start = min(
+            self._line_end(row), self._starts[row] + self.horizontalScrollBar().value()
+        )
+        max_chars = min(
+            4096,
+            max(1, (self.viewport().width() - self._gutter_width()) // self._cw + 48),
+        )
+        displayed = self._log[start : min(self._line_end(row), start + max_chars)]
+        layout = QTextLayout(displayed, self._font)
+        option = QTextOption()
+        option.setWrapMode(QTextOption.WrapMode.NoWrap)
+        option.setTabStopDistance(self._cw * 4)
+        layout.setTextOption(option)
+        if highlight:
+            ranges = []
+            astral = any(ord(ch) > 0xFFFF for ch in displayed)
+            for a, b, ink in vscode_log_runs(displayed):
+                span = QTextLayout.FormatRange()
+                span.start = self._utf16_offset(displayed, a) if astral else a
+                end = self._utf16_offset(displayed, b) if astral else b
+                span.length = end - span.start
+                span.format.setForeground(self._ink_colors[ink])
+                ranges.append(span)
+            layout.setFormats(ranges)
+        layout.beginLayout()
+        text_line = layout.createLine()
+        if text_line.isValid():
+            text_line.setLineWidth(1000000.0)
+            text_line.setPosition(QPointF(0.0, 0.0))
+        layout.endLayout()
+        return start, displayed, layout, text_line
+
+    def selection_range(self):
+        return min(self._anchor, self._cursor), max(self._anchor, self._cursor)
+
+    def has_selection(self):
+        return self._anchor != self._cursor
+
+    def selected_text(self):
+        start, end = self.selection_range()
+        return self._log[start:end]
+
+    def copy(self):
+        if self.has_selection():
+            QApplication.clipboard().setText(self.selected_text())
+        elif self._log:
+            self.copy_current_line()
+
+    def copy_current_line(self):
+        QApplication.clipboard().setText(self._get_line(self._line))
+
+    def select_all(self):
+        # Constant-size selection state even for multi-million-line logs.
+        self._anchor = 0
+        self._move_to(len(self._log), extend=True, reveal=False)
+
+    def _move_to(self, position, extend=False, reveal=True):
+        self._cursor = min(len(self._log), max(0, int(position)))
+        if not extend:
+            self._anchor = self._cursor
+        self._line = max(0, bisect_right(self._starts, self._cursor) - 1)
+        self._column = (
+            min(self._cursor, self._line_end(self._line)) - self._starts[self._line]
+        )
+        self._mark_len = 0
+        if reveal:
+            self._reveal_cursor()
+        self.selectionChanged.emit()
+        self.cursorPositionChanged.emit()
+        self.viewport().update()
+
+    def _reveal_cursor(self):
+        bar = self.verticalScrollBar()
+        if (
+            self._line < bar.value()
+            or self._line >= bar.value() + self._visible_count()
+        ):
+            bar.setValue(max(0, self._line - max(1, self._visible_count() // 3)))
+        self._resize_horizontal()
+        horizontal = self.horizontalScrollBar()
+        if (
+            self._column < horizontal.value()
+            or self._column >= horizontal.value() + max(1, horizontal.pageStep() // 2)
+        ):
+            horizontal.setValue(max(0, self._column - 12))
+
+    def goto(self, line, column=0, length=0):
+        row = min(max(0, int(line)), self.line_count() - 1)
+        start = self._starts[row]
+        end = self._line_end(row)
+        position = min(end, start + max(0, int(column)))
+        self._anchor = position
+        # Find-next regexes may span line breaks; copying their selection must
+        # preserve the complete match rather than stop at the first line.
+        self._move_to(min(len(self._log), position + max(0, int(length))), extend=True)
+        self._mark_col = position - start
+        self._mark_len = max(0, self._cursor - position)
+        self.viewport().update()
+
+    def _offset_at(self, point):
+        row = self.verticalScrollBar().value() + max(0, point.y() // self._lh)
+        row = min(self.line_count() - 1, row)
+        start, displayed, layout, text_line = self._layout_for_line(row)
+        if not displayed or not text_line.isValid():
+            return start
+        x = max(0, point.x() - self._gutter_width() - 9)
+        utf16 = text_line.xToCursor(float(x))
+        return start + self._python_offset(displayed, utf16)
 
     def paintEvent(self, event):
-        """一行一次 QTextLayout 绘制。不能将彩色段分别 drawText，中文和数字会错位重影。"""
         painter = QPainter(self.viewport())
         painter.fillRect(event.rect(), QColor("#FFFFFF"))
         painter.setFont(self._font)
-        top_line = self.verticalScrollBar().value()
-        rows = self._visible_count() + 2
-        digits = max(5, len(str(len(self._starts))))
-        gutter = max(54, digits * self._cw + 15)
+        top = self.verticalScrollBar().value()
+        gutter = self._gutter_width()
+        text_left = gutter + 9
+        width = max(0, self.viewport().width() - gutter - 1)
         painter.fillRect(0, 0, gutter, self.viewport().height(), QColor("#F6F8FA"))
         painter.setPen(QColor("#D0D7DE"))
         painter.drawLine(gutter - 1, 0, gutter - 1, self.viewport().height())
-        horizontal_chars = self.horizontalScrollBar().value()
-        # 控制绘制字符串长度：超长行也不会触发全行文本排版。
-        max_chars = min(
-            4096, max(1, (self.viewport().width() - gutter) // self._cw + 48)
-        )
-        text_left = gutter + 9
-        visible_width = max(0, self.viewport().width() - gutter - 1)
-
-        for row_no in range(top_line, min(top_line + rows, len(self._starts))):
-            y = (row_no - top_line) * self._lh
-            if y >= self.viewport().height():
-                break
-            if row_no == self._line:
-                painter.fillRect(gutter, y, visible_width, self._lh, QColor("#EEF5FF"))
-            painter.setPen(QColor("#0969DA" if row_no == self._line else "#8C959F"))
+        selected_start, selected_end = self.selection_range()
+        for row in range(top, min(top + self._visible_count() + 2, self.line_count())):
+            y = (row - top) * self._lh
+            if row == self._line:
+                painter.fillRect(gutter, y, width, self._lh, QColor("#F0F5FA"))
+            painter.setPen(QColor("#375C8F" if row == self._line else "#66717F"))
             painter.drawText(
                 0,
                 y + 1,
                 gutter - 9,
                 self._lh - 2,
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                str(row_no + 1),
+                str(row + 1),
             )
-            raw = self._get_line(row_no)
-            if horizontal_chars >= len(raw):
-                continue
-            displayed = raw[horizontal_chars : horizontal_chars + max_chars]
-            if not displayed:
-                continue
-
-            layout = QTextLayout(displayed, self._font)
-            option = QTextOption()
-            option.setWrapMode(QTextOption.WrapMode.NoWrap)
-            option.setTabStopDistance(self._cw * 4)
-            layout.setTextOption(option)
-            ranges = []
-            has_astral = any(ord(ch) > 0xFFFF for ch in displayed)
-            for match_start, match_end, color_index in vscode_log_runs(displayed):
-                span = QTextLayout.FormatRange()
-                # QTextLayout 使用 UTF-16 索引；补偿日志里出现 Emoji 时的位置偏移。
-                if has_astral:
-                    span.start = len(displayed[:match_start].encode("utf-16-le")) // 2
-                    span.length = (
-                        len(displayed[match_start:match_end].encode("utf-16-le")) // 2
-                    )
-                else:
-                    span.start = match_start
-                    span.length = match_end - match_start
-                style = QTextCharFormat()
-                style.setForeground(self._ink_colors[color_index])
-                span.format = style
-                ranges.append(span)
-            if ranges:
-                layout.setFormats(ranges)
-            layout.beginLayout()
-            text_line = layout.createLine()
-            if text_line.isValid():
-                text_line.setLineWidth(1000000.0)
-                text_line.setPosition(QPointF(0.0, 0.0))
-            layout.endLayout()
+            start, displayed, layout, text_line = self._layout_for_line(
+                row, highlight=True
+            )
+            astral = any(ord(ch) > 0xFFFF for ch in displayed)
             if not text_line.isValid():
                 continue
-
-            # 匹配背景坐标由同一文本排版器计算，不再用字符数推算宽度。
-            if row_no == self._line and self._mark_len > 0:
-                start_col = max(horizontal_chars, self._mark_col)
-                end_col = min(
-                    horizontal_chars + len(displayed), self._mark_col + self._mark_len
+            # All non-token text must use the body color. Previously QTextLayout
+            # inherited the last gutter-number pen, making body text look gray.
+            a, b = max(start, selected_start), min(start + len(displayed), selected_end)
+            if a < b:
+                ua = self._utf16_offset(displayed, a - start) if astral else a - start
+                ub = self._utf16_offset(displayed, b - start) if astral else b - start
+                left = text_left + text_line.cursorToX(ua)[0]
+                right = text_left + text_line.cursorToX(ub)[0]
+                color = "#F3DFA6" if self._mark_len else "#D5E5F5"
+                painter.fillRect(
+                    QRect(
+                        int(min(left, right)),
+                        y + 1,
+                        max(2, int(abs(right - left))),
+                        self._lh - 2,
+                    ),
+                    QColor(color),
                 )
-                if end_col > start_col:
-                    if has_astral:
-                        a = (
-                            len(
-                                displayed[: start_col - horizontal_chars].encode(
-                                    "utf-16-le"
-                                )
-                            )
-                            // 2
-                        )
-                        b = (
-                            len(
-                                displayed[: end_col - horizontal_chars].encode(
-                                    "utf-16-le"
-                                )
-                            )
-                            // 2
-                        )
-                    else:
-                        a = start_col - horizontal_chars
-                        b = end_col - horizontal_chars
-                    left = text_left + text_line.cursorToX(a)[0]
-                    right = text_left + text_line.cursorToX(b)[0]
-                    painter.fillRect(
-                        QRect(
-                            int(min(left, right)),
-                            y + 1,
-                            max(2, int(abs(right - left))),
-                            self._lh - 2,
-                        ),
-                        QColor("#FFDA70"),
-                    )
+            # Show a selected newline, including empty rows in multi-line ranges.
+            end = self._line_end(row)
+            if (
+                selected_start <= end < selected_end
+                and end < len(self._log)
+                and self._log[end] in "\r\n"
+                and start + len(displayed) == end
+            ):
+                x = text_left + text_line.naturalTextWidth()
+                painter.fillRect(
+                    QRect(int(x), y + 1, self._cw, self._lh - 2), QColor("#D5E5F5")
+                )
             painter.save()
-            painter.setClipRect(gutter + 1, y, visible_width, self._lh)
+            painter.setClipRect(gutter + 1, y, width, self._lh)
+            painter.setPen(self._ink_colors[0])
             layout.draw(painter, QPointF(text_left, y + 1))
+            if (
+                self.hasFocus()
+                and not self.has_selection()
+                and row == self._line
+                and start <= self._cursor <= start + len(displayed)
+            ):
+                offset = (
+                    self._utf16_offset(displayed, self._cursor - start)
+                    if astral
+                    else self._cursor - start
+                )
+                x = int(text_left + text_line.cursorToX(offset)[0])
+                painter.fillRect(x, y + 3, 1, self._lh - 5, self._ink_colors[0])
             painter.restore()
         painter.end()
 
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.setFocus()
+            self._dragging = True
+            self._drag_pos = event.position().toPoint()
+            self._move_to(
+                self._offset_at(self._drag_pos),
+                extend=bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier),
+                reveal=False,
+            )
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._dragging:
+            self._drag_pos = event.position().toPoint()
+            self._move_to(self._offset_at(self._drag_pos), extend=True, reveal=False)
+            if self.viewport().rect().contains(self._drag_pos):
+                self._drag_timer.stop()
+            elif not self._drag_timer.isActive():
+                self._drag_timer.start()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self._dragging:
+            self._move_to(
+                self._offset_at(event.position().toPoint()), extend=True, reveal=False
+            )
+            self._dragging = False
+            self._drag_timer.stop()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            position = self._offset_at(event.position().toPoint())
+            self._move_to(position, reveal=False)
+            start, end = self._starts[self._line], self._line_end(self._line)
+            position = min(position, max(start, end - 1))
+
+            def category(char):
+                return (
+                    0 if char.isalnum() or char == "_" else (1 if char.isspace() else 2)
+                )
+
+            if start < end:
+                kind = category(self._log[position])
+                left, right = position, position + 1
+                while left > start and category(self._log[left - 1]) == kind:
+                    left -= 1
+                while right < end and category(self._log[right]) == kind:
+                    right += 1
+                self._anchor = left
+                self._move_to(right, extend=True, reveal=False)
+            self._dragging = False
+            self._drag_timer.stop()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def _autoscroll_selection(self):
+        if not self._dragging:
+            self._drag_timer.stop()
+            return
+        rect = self.viewport().rect()
+        vertical, horizontal = self.verticalScrollBar(), self.horizontalScrollBar()
+        if self._drag_pos.y() < 0:
+            vertical.setValue(
+                vertical.value() - min(20, 1 + abs(self._drag_pos.y()) // self._lh)
+            )
+        elif self._drag_pos.y() > rect.bottom():
+            vertical.setValue(
+                vertical.value()
+                + min(20, 1 + (self._drag_pos.y() - rect.bottom()) // self._lh)
+            )
+        if self._drag_pos.x() < self._gutter_width():
+            horizontal.setValue(horizontal.value() - 3)
+        elif self._drag_pos.x() > rect.right():
+            horizontal.setValue(horizontal.value() + 3)
+        self._move_to(self._offset_at(self._drag_pos), extend=True, reveal=False)
+
+    def focusOutEvent(self, event):
+        self._dragging = False
+        self._drag_timer.stop()
+        self.viewport().update()
+        super().focusOutEvent(event)
+
+    def focusInEvent(self, event):
+        super().focusInEvent(event)
+        self.viewport().update()
+
+    def contextMenuEvent(self, event):
+        menu = QMenu(self)
+        copy_action = menu.addAction("复制\tCtrl+C", self.copy)
+        copy_action.setEnabled(bool(self._log))
+        menu.addAction("复制当前行", self.copy_current_line).setEnabled(bool(self._log))
+        menu.addSeparator()
+        menu.addAction("全选\tCtrl+A", self.select_all).setEnabled(bool(self._log))
+        menu.exec(event.globalPos())
+
     def wheelEvent(self, event):
-        # 不等待文本控件排版；直接移动整份文件对应的滚动条。
         steps = event.angleDelta().y() / 120
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
             self.set_code_font(
                 max(7, min(18, self._font.pointSize() + (1 if steps > 0 else -1)))
             )
         elif event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
-            hb = self.horizontalScrollBar()
-            hb.setValue(hb.value() - round(steps * 5))
+            bar = self.horizontalScrollBar()
+            bar.setValue(bar.value() - round(steps * 5))
         else:
-            vb = self.verticalScrollBar()
-            vb.setValue(vb.value() - round(steps * 3))
+            bar = self.verticalScrollBar()
+            bar.setValue(bar.value() - round(steps * 3))
         event.accept()
 
-    def goto(self, line, column=0, length=0):
-        self._line = min(max(0, int(line)), max(0, len(self._starts) - 1))
-        self._column = max(0, int(column))
-        self._mark_col = self._column
-        self._mark_len = max(0, int(length))
-        view = self._visible_count()
-        vb = self.verticalScrollBar()
-        if self._line < vb.value() or self._line >= vb.value() + view:
-            vb.setValue(max(0, self._line - max(1, view // 3)))
-        if (
-            self._column < self.horizontalScrollBar().value()
-            or self._column
-            > self.horizontalScrollBar().value()
-            + self.viewport().width() // self._cw
-            - 15
-        ):
-            self.horizontalScrollBar().setValue(max(0, self._column - 12))
-        self.cursorPositionChanged.emit()
-        self.viewport().update()
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            gutter = max(54, max(5, len(str(len(self._starts)))) * self._cw + 15)
-            line = self.verticalScrollBar().value() + max(
-                0, int(event.position().y()) // self._lh
-            )
-            col = self.horizontalScrollBar().value() + max(
-                0, (int(event.position().x()) - gutter - 7) // self._cw
-            )
-            self.goto(line, col)
-            self.setFocus()
-        super().mousePressEvent(event)
-
     def keyPressEvent(self, event):
-        key = event.key()
         if event.matches(QKeySequence.StandardKey.Copy):
-            line = self._get_line(self._line)
-            if self._mark_len:
-                line = line[self._mark_col : self._mark_col + self._mark_len]
-            QApplication.clipboard().setText(line)
+            self.copy()
+            event.accept()
             return
-        if key == Qt.Key.Key_Down:
-            self.goto(self._line + 1, self._column)
+        if event.matches(QKeySequence.StandardKey.SelectAll):
+            self.select_all()
+            event.accept()
             return
-        if key == Qt.Key.Key_Up:
-            self.goto(self._line - 1, self._column)
+        key = event.key()
+        extend = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        control = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+        position = self._cursor
+        if key == Qt.Key.Key_Left:
+            if self.has_selection() and not extend:
+                position = self.selection_range()[0]
+            elif self._column == 0 and self._line > 0:
+                position = self._line_end(self._line - 1)
+            else:
+                position = max(0, position - 1)
+        elif key == Qt.Key.Key_Right:
+            if self.has_selection() and not extend:
+                position = self.selection_range()[1]
+            elif (
+                position >= self._line_end(self._line)
+                and self._line + 1 < self.line_count()
+            ):
+                position = self._starts[self._line + 1]
+            else:
+                position = min(len(self._log), position + 1)
+        elif key in (
+            Qt.Key.Key_Up,
+            Qt.Key.Key_Down,
+            Qt.Key.Key_PageUp,
+            Qt.Key.Key_PageDown,
+        ):
+            amount = (
+                self._visible_count()
+                if key in (Qt.Key.Key_PageUp, Qt.Key.Key_PageDown)
+                else 1
+            )
+            row = self._line + (
+                -amount if key in (Qt.Key.Key_Up, Qt.Key.Key_PageUp) else amount
+            )
+            row = min(self.line_count() - 1, max(0, row))
+            position = min(self._line_end(row), self._starts[row] + self._column)
+        elif key == Qt.Key.Key_Home:
+            position = 0 if control else self._starts[self._line]
+        elif key == Qt.Key.Key_End:
+            position = len(self._log) if control else self._line_end(self._line)
+        else:
+            super().keyPressEvent(event)
             return
-        if key == Qt.Key.Key_PageDown:
-            self.goto(self._line + self._visible_count(), self._column)
-            return
-        if key == Qt.Key.Key_PageUp:
-            self.goto(self._line - self._visible_count(), self._column)
-            return
-        if key == Qt.Key.Key_Home:
-            self.goto(0)
-            return
-        if key == Qt.Key.Key_End:
-            self.goto(self.line_count() - 1)
-            return
-        super().keyPressEvent(event)
+        self._move_to(position, extend=extend)
+        event.accept()
 
     def goto_wrap(self, wrap):
-        # 超大文件为了避免数百万行重新排版，始终保持水平滚动。
         self._wrap = bool(wrap)
         self.viewport().update()
 
     def set_code_font(self, size):
         self._font = QFont("Consolas", int(size))
-        self._font.setKerning(False)
         self._font.setStyleHint(QFont.StyleHint.Monospace)
         self._font.setFixedPitch(True)
         self._font.setKerning(False)

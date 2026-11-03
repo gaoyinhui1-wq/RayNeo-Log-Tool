@@ -31,8 +31,24 @@ ok
 test_open_preview_analyze_search_and_reuse (test_gui.GuiTests.test_open_preview_analyze_search_and_reuse) ... ok
 test_startup_does_not_load_analysis_or_optional_codecs (test_gui.GuiTests.test_startup_does_not_load_analysis_or_optional_codecs) ... ok
 test_visible_highlight_and_unicode_dont_crash (test_gui.GuiTests.test_visible_highlight_and_unicode_dont_crash) ... ok
+test_downloads_shortcut_preserves_default_places (test_ui_regressions.GuiRegressionTests.test_downloads_shortcut_preserves_default_places) ... ok
+test_empty_import_clears_old_preview (test_ui_regressions.GuiRegressionTests.test_empty_import_clears_old_preview) ... ok
+test_find_while_offsets_pending_uses_actual_text_line (test_ui_regressions.GuiRegressionTests.test_find_while_offsets_pending_uses_actual_text_line) ... ok
+test_queued_switch_to_cached_text_still_builds_missing_offsets (test_ui_regressions.GuiRegressionTests.test_queued_switch_to_cached_text_still_builds_missing_offsets) ... ok
+test_search_result_unicode_offsets_select_original_fragment (test_ui_regressions.GuiRegressionTests.test_search_result_unicode_offsets_select_original_fragment) ... ok
+test_top_decrypt_button_opens_existing_local_dialog (test_ui_regressions.GuiRegressionTests.test_top_decrypt_button_opens_existing_local_dialog) ... ok
+test_body_paints_dark_text_not_only_gutter_or_selection_rectangles (test_viewer_interaction.SelectionTests.test_body_paints_dark_text_not_only_gutter_or_selection_rectangles) ... ok
+test_double_click_and_context_menu_copy (test_viewer_interaction.SelectionTests.test_double_click_and_context_menu_copy) ... ok
+test_home_end_and_crlf_arrows (test_viewer_interaction.SelectionTests.test_home_end_and_crlf_arrows) ... ok
+test_long_line_can_be_reached_and_copied_beyond_1000_columns (test_viewer_interaction.SelectionTests.test_long_line_can_be_reached_and_copied_beyond_1000_columns) ... ok
+test_mouse_fragment_and_reverse_multiline_copy_preserve_original (test_viewer_interaction.SelectionTests.test_mouse_fragment_and_reverse_multiline_copy_preserve_original) ... ok
+test_mouse_selection_uses_glyph_coordinates_for_cjk_emoji_and_tabs (test_viewer_interaction.SelectionTests.test_mouse_selection_uses_glyph_coordinates_for_cjk_emoji_and_tabs) ... ok
+test_search_selection_can_span_line_breaks (test_viewer_interaction.SelectionTests.test_search_selection_can_span_line_breaks) ... ok
+test_select_all_on_large_log_does_not_rebuild_line_index (test_viewer_interaction.SelectionTests.test_select_all_on_large_log_does_not_rebuild_line_index) ... ok
+test_selection_drags_scroll_and_clear_on_file_switch (test_viewer_interaction.SelectionTests.test_selection_drags_scroll_and_clear_on_file_switch) ... ok
+test_shift_arrows_click_select_all_and_copy (test_viewer_interaction.SelectionTests.test_shift_arrows_click_select_all_and_copy) ... ok
 
 ----------------------------------------------------------------------
-Ran 31 tests in 0.403s
+Ran 47 tests in 0.638s
 
 OK

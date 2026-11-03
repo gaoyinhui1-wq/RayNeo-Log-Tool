@@ -15,8 +15,11 @@ def scan_log_matches(
     """Line-streaming search; only one pass, never builds a lowercased copy of all logs."""
     if not query:
         return [], False
-    pattern = re.compile(query, 0 if case_sensitive else re.I) if regex else None
-    needle = query if case_sensitive else query.casefold()
+    pattern = (
+        re.compile(query if regex else re.escape(query), 0 if case_sensitive else re.I)
+        if regex or not case_sensitive
+        else None
+    )
     matches = []
     for path, content in data.items():
         if content is None:
@@ -24,14 +27,14 @@ def scan_log_matches(
         if not isinstance(content, str):
             continue
         for lineno, line in enumerate(io.StringIO(content), 1):
-            if cancelled is not None and lineno % 1024 == 0 and cancelled():
+            if (
+                cancelled is not None
+                and (lineno == 1 or lineno % 1024 == 0)
+                and cancelled()
+            ):
                 return matches, False
             line = line.rstrip("\r\n")
-            found = (
-                bool(pattern.search(line))
-                if regex
-                else (needle in (line if case_sensitive else line.casefold()))
-            )
+            found = bool(pattern.search(line)) if pattern is not None else query in line
             if found:
                 matches.append((path, lineno, line))
                 if len(matches) >= max_results:

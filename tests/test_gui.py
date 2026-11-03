@@ -4,53 +4,17 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import json
 import subprocess
 import sys
-import tempfile
-import time
 import unittest
 from pathlib import Path
 from PyQt6.QtCore import QItemSelectionModel
-from PyQt6.QtWidgets import QApplication, QTreeView
-from rayneo.window import AppWindow
+from PyQt6.QtWidgets import QTreeView
+from gui_support import GuiCase
 from rayneo.dialogs import InputDialog
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-class GuiTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.app = QApplication.instance() or QApplication([])
-
-    def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
-        self.win = AppWindow()
-        self.win.show()
-        self.app.processEvents()
-        self.addCleanup(self.finish)
-
-    def finish(self):
-        self.wait(
-            lambda: (
-                not self.win._busy()
-                and not (
-                    self.win.file_read_worker and self.win.file_read_worker.isRunning()
-                )
-            )
-        )
-        self.win.close()
-        self.app.processEvents()
-
-    def wait(self, condition, timeout=10):
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            self.app.processEvents()
-            if condition():
-                return
-            time.sleep(0.005)
-        self.fail("Background GUI task timed out")
-
+class GuiTests(GuiCase):
     def test_open_preview_analyze_search_and_reuse(self):
         folder = self.root / "folder"
         folder.mkdir()
