@@ -2,6 +2,14 @@
 
 基于你提供的 `RayNeo_Log_Tool.py` 和 `异常判定规则.json` 修改的桌面日志工具。采用轻量模块化项目：仍只有一个启动入口，不需要服务器、数据库或账号。原始上传文件与 ADClose 仓库均未修改。
 
+## 1.3.2 Windows 自动构建
+
+仓库新增 `Build Windows EXE` 工作流。更新主分支相关源码或在 Actions 页面点击 Run workflow，会在 Windows x64 / Python 3.12 环境运行测试、打包并实际启动生成的 EXE，检查导入、分析、筛选、复制以及加密/解压依赖。
+
+构建通过后，进入 [Windows 构建页面](https://github.com/gaoyinhui1-wq/RayNeo-Log-Tool/actions/workflows/build-windows.yml)，打开成功的运行记录，在 Artifacts 中下载 **RayNeo-Log-Tool-Windows-x64**。需要登录 GitHub；下载完整解压后双击 `RayNeo_Log_Tool.exe`，无需安装 Python。`Windows-build-diagnostics` 是诊断文件，不是应用程序。
+
+自动构建状态及产物以对应运行记录为准；仅推送工作流不代表 EXE 已构建成功。
+
 ## 1.3.1 启动缺文件提示
 
 若更新时漏掉项目模块，入口会明确显示缺少哪个文件和恢复方法；第三方依赖错误仍保留原始错误信息。
@@ -108,7 +116,7 @@ JSON 保留你上传的规则内容。本次重点修复执行逻辑，没有重
 
 ## 验证与性能
 
-在 Linux、Python 3.12.14、PyQt6 6.12.0 的 `offscreen` 平台完成 **71 项 unittest 回归测试**，含真实 Qt 后台导入→预览→分析→重复分析→筛选流程、混合导入选择器、Unicode 高亮、真实鼠标和键盘选择、Downloads 快捷入口、文件切换竞争、筛选标记实际绘制/清除/异步导航、独立源码副本启动及故意移除模块后的恢复提示、加密认证、嵌套容器及规则误判边界。结果见 `validation.txt`。另通过 Python 编译检查和 Ruff 未定义名称检查。
+在 Linux、Python 3.12.14、PyQt6 6.12.0 的 `offscreen` 平台完成 **74 项 unittest 回归测试**，含真实 Qt 后台导入→预览→分析→重复分析→筛选流程、混合导入选择器、Unicode 高亮、真实鼠标和键盘选择、Downloads 快捷入口、文件切换竞争、筛选标记实际绘制/清除/异步导航、独立源码副本启动及故意移除模块后的恢复提示、加密认证、嵌套容器及规则误判边界。结果见 `validation.txt`。另通过 Python 编译检查和 Ruff 未定义名称检查。
 
 以下为 1.1 版本保存的基准结果（本轮未改动候选索引算法）：同一机器、5 次中位数、100,000 行 / 5,587,514 字节合成日志、相同启用规则。后续版本的界面启动耗时未重新测量：
 
@@ -129,9 +137,18 @@ python tools/benchmark.py --baseline /path/to/original/RayNeo_Log_Tool.py
 
 无图形桌面时设置 `QT_QPA_PLATFORM=offscreen`。纯解析测试可以单独运行 `python -m unittest discover -s tests -p test_core.py -v`。
 
-## Windows EXE（可选，尚未在 Windows 验证）
+## 在 Windows 本地构建 EXE
 
-在 Windows 安装完依赖后运行 `tools/build_windows.bat`，使用 PyInstaller 生成 `dist\RayNeo_Log_Tool\RayNeo_Log_Tool.exe`。脚本采用 **onedir**，避免 onefile 每次启动都解压 Qt 运行时；分发时须保留整个输出目录。当前下载包是源码项目，未附声称可运行的 Windows EXE。
+安装完依赖后，双击 `tools/build_windows.bat`。也可以在已激活虚拟环境的 PowerShell 中执行：
+
+```powershell
+python -m pip install "pyinstaller>=6.10,<7"
+python .\tools\build_windows.py
+```
+
+脚本必须在 Windows x64 和 64 位 Python 上运行，会先检查源码导入，再生成并验收 `dist\RayNeo_Log_Tool\RayNeo_Log_Tool.exe`，最后输出 `dist\RayNeo-Log-Tool-Windows-x64.zip`。脚本采用 **onedir**，减少每次启动解压 Qt 的开销；分发时须保留整个输出目录，包括 `_internal` 和规则 JSON。
+
+打包后的验收报告为 `dist/build-smoke-test.json`。构建失败时脚本会返回非零退出码，不会把失败验收当成成功构建。
 
 ## 仍需实测的范围
 

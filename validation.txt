@@ -1,3 +1,7 @@
+test_smoke_report_records_failure_without_waiting_for_a_dialog (test_build_checks.BuildChecks.test_smoke_report_records_failure_without_waiting_for_a_dialog) ... Fontconfig error: No writable cache directories
+ok
+test_source_smoke_cli_checks_the_application_and_writes_report (test_build_checks.BuildChecks.test_source_smoke_cli_checks_the_application_and_writes_report) ... ok
+test_windows_builder_refuses_to_produce_a_linux_binary (test_build_checks.BuildChecks.test_windows_builder_refuses_to_produce_a_linux_binary) ... ok
 test_archive_traversal_is_skipped (test_core.InputTests.test_archive_traversal_is_skipped) ... ok
 test_bad_archive_is_not_analyzed_as_text (test_core.InputTests.test_bad_archive_is_not_analyzed_as_text) ... ok
 test_cancel_is_propagated (test_core.InputTests.test_cancel_is_propagated) ... ok
@@ -25,8 +29,7 @@ test_timeout_incomplete_or_gapped_is_not_failure (test_core.RuleTests.test_timeo
 test_timeout_recovery_and_normal_action (test_core.RuleTests.test_timeout_recovery_and_normal_action) ... ok
 test_timeout_uses_ordinary_heartbeat_coverage (test_core.RuleTests.test_timeout_uses_ordinary_heartbeat_coverage) ... ok
 test_unicode_lowercase_keeps_original_offsets (test_core.RuleTests.test_unicode_lowercase_keeps_original_offsets) ... ok
-test_clearing_input_or_button_removes_result_and_source_marks (test_filter_highlighting.FilterHighlightTests.test_clearing_input_or_button_removes_result_and_source_marks) ... Fontconfig error: No writable cache directories
-ok
+test_clearing_input_or_button_removes_result_and_source_marks (test_filter_highlighting.FilterHighlightTests.test_clearing_input_or_button_removes_result_and_source_marks) ... ok
 test_editing_query_does_not_change_completed_result_navigation (test_filter_highlighting.FilterHighlightTests.test_editing_query_does_not_change_completed_result_navigation) ... ok
 test_invalid_regex_clears_previous_results_and_keeps_controls_usable (test_filter_highlighting.FilterHighlightTests.test_invalid_regex_clears_previous_results_and_keeps_controls_usable) ... ok
 test_long_elided_rows_and_zero_width_markers_render_without_changing_raw (test_filter_highlighting.FilterHighlightTests.test_long_elided_rows_and_zero_width_markers_render_without_changing_raw) ... ok
@@ -73,6 +76,6 @@ test_selection_drags_scroll_and_clear_on_file_switch (test_viewer_interaction.Se
 test_shift_arrows_click_select_all_and_copy (test_viewer_interaction.SelectionTests.test_shift_arrows_click_select_all_and_copy) ... ok
 
 ----------------------------------------------------------------------
-Ran 71 tests in 1.752s
+Ran 74 tests in 2.342s
 
 OK

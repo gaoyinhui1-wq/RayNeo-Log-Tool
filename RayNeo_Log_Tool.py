@@ -6,6 +6,10 @@ import sys
 
 def main():
     try:
+        if "--smoke-test" in sys.argv[1:]:
+            from rayneo.smoke_test import main as run_check
+
+            return run_check()
         from rayneo.app import main as run_app
 
         return run_app()
