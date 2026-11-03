@@ -86,7 +86,10 @@ class GuiTests(GuiCase):
         selection.select(model.index(str(file)), flag)
         selection.select(model.index(str(folder)), flag)
         dialog.accept()
-        self.assertEqual(set(dialog.paths), {str(folder), str(file)})
+        self.assertEqual(
+            {Path(path).resolve() for path in dialog.paths},
+            {folder.resolve(), file.resolve()},
+        )
         dialog.deleteLater()
 
     def test_startup_does_not_load_analysis_or_optional_codecs(self):

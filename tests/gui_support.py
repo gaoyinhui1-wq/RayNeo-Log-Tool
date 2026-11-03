@@ -17,7 +17,9 @@ class GuiCase(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        # Qt returns long forward-slash paths on Windows, while tempfile may
+        # return an 8.3 path such as RUNNER~1. Use one physical path identity.
+        self.root = Path(self.temp.name).resolve()
         self.win = AppWindow()
         self.win.show()
         self.app.processEvents()

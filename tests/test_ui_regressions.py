@@ -23,9 +23,13 @@ class GuiRegressionTests(GuiCase):
         ):
             dialog = InputDialog(self.win)
         self.addCleanup(dialog.deleteLater)
-        paths = {url.toLocalFile() for url in dialog.sidebarUrls()}
-        self.assertIn(str(download), paths)
-        self.assertIn(str(Path.home()), paths)
+        paths = {
+            Path(url.toLocalFile()).resolve()
+            for url in dialog.sidebarUrls()
+            if url.toLocalFile()
+        }
+        self.assertIn(download.resolve(), paths)
+        self.assertIn(Path.home().resolve(), paths)
 
     def test_top_decrypt_button_opens_existing_local_dialog(self):
         self.assertTrue(self.win.btn_decrypt.isVisible())

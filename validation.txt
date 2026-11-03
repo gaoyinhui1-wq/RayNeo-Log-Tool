@@ -76,6 +76,6 @@ test_selection_drags_scroll_and_clear_on_file_switch (test_viewer_interaction.Se
 test_shift_arrows_click_select_all_and_copy (test_viewer_interaction.SelectionTests.test_shift_arrows_click_select_all_and_copy) ... ok
 
 ----------------------------------------------------------------------
-Ran 74 tests in 2.342s
+Ran 74 tests in 2.469s
 
 OK
