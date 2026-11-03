@@ -4,6 +4,13 @@
 
 ## 1.3.2 Windows 自动构建
 
+本次 **Windows x64 程序包（1.3.2）已构建并通过验收**，大小约 40 MB：
+
+- [下载 Windows 程序包（需要登录 GitHub）](https://github.com/gaoyinhui1-wq/RayNeo-Log-Tool/actions/runs/41592923063/artifacts/13210513285)
+- [查看成功构建记录](https://github.com/gaoyinhui1-wq/RayNeo-Log-Tool/actions/runs/41592923063)
+
+在 GitHub Windows runner 上，74 项回归测试和打包后 EXE 的实际运行检查均通过。源码提交为 `a475f8b`，程序包包括 EXE、`_internal`、规则 JSON 和使用说明。解压后双击 EXE 即可，无需安装 Python。该 Actions 产物保留 30 天，到期可重新运行构建。
+
 仓库新增 `Build Windows EXE` 工作流。更新主分支相关源码或在 Actions 页面点击 Run workflow，会在 Windows x64 / Python 3.12 环境运行测试、打包并实际启动生成的 EXE，检查导入、分析、筛选、复制以及加密/解压依赖。
 
 构建通过后，进入 [Windows 构建页面](https://github.com/gaoyinhui1-wq/RayNeo-Log-Tool/actions/workflows/build-windows.yml)，打开成功的运行记录，在 Artifacts 中下载 **RayNeo-Log-Tool-Windows-x64**。需要登录 GitHub；下载完整解压后双击 `RayNeo_Log_Tool.exe`，无需安装 Python。`Windows-build-diagnostics` 是诊断文件，不是应用程序。
@@ -153,5 +160,5 @@ python .\tools\build_windows.py
 ## 仍需实测的范围
 
 - 尚未收到真实误判日志，不能承诺已消除全部误判；本次通过的是针对已定位代码缺陷的回归测试。
-- 未在 Windows 实机测试原生字体、文件系统权限、桌面交互或 EXE 打包脚本。
+- 已在 GitHub Windows x64 runner 验证构建、回归测试及打包后程序的离屏运行；用户电脑上的实际桌面交互、特殊权限和真实日志仍需复测。
 - JSON 的局部时间关联仍以单个文件为证据范围。跨文件、多设备的关联沿用原有高级诊断流程；文件轮转或多设备混合日志还需真实样本校验，未改造为完整的按设备分流状态机。
