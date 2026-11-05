@@ -58,6 +58,9 @@ def run_checks():
             # Error dialogs must not block an unattended CI runner.
             with patch("rayneo.window.QMessageBox.warning", side_effect=dialog_error):
                 window.show()
+                assert not window.windowIcon().isNull()
+                assert window.search_dock.isVisible()
+                checks.append("application icon and permanent search")
                 window.start_preview([str(source)], True)
                 wait_for(lambda: not window._busy() and window.file_read_worker is None)
                 assert "physical connect timeout" in window.viewer._log
@@ -65,6 +68,8 @@ def run_checks():
                 window.reanalyze()
                 wait_for(lambda: not window._busy() and window.file_read_worker is None)
                 assert window.has_analyzed and window.incidents
+                assert window._report_dialog.isVisible()
+                assert window.last_analysis_metadata["process_token"] != os.getpid()
                 checks.append("background analysis and report")
                 window.search_input.setText("disconnect")
                 window.filter_all()

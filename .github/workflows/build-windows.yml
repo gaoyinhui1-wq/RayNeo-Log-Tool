@@ -6,6 +6,7 @@ on:
     branches: [main]
     paths:
       - 'rayneo/**'
+      - 'assets/**'
       - 'tests/**'
       - 'tools/build_windows*'
       - 'RayNeo_Log_Tool.py'

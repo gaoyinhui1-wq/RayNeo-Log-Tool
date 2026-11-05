@@ -40,8 +40,10 @@ class GuiTests(GuiCase):
         self.win.reanalyze()
         self.wait(lambda: not self.win._busy())
         self.assertEqual(
-            self.win.prepared_payload["files_content"], payload["files_content"]
+            self.win.prepared_payload["process_token"], payload["process_token"]
         )
+        self.assertTrue(self.win.last_analysis_metadata["reused_cache"])
+        self.assertLessEqual(len(self.win.raw_data), 3)
         self.assertEqual(len(self.win.incidents), 1)
         self.win.search_input.setText("healthy")
         self.win.filter_all()

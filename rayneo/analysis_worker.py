@@ -380,6 +380,49 @@ class WorkerThread(QThread):
                 point_incidents = _dedupe_same_failure_aliases(
                     smart_diagnose_incidents(point_incidents, relevant_content)
                 )
+                from .link_diagnostics import (
+                    detect_notification_incidents,
+                    classify_link_incidents,
+                )
+
+                notification = detect_notification_incidents(relevant_content)
+                if self.range_start is not None:
+                    notification = [
+                        item
+                        for item in notification
+                        if item.get("time")
+                        and self.range_start <= item["time"] <= self.range_end
+                    ]
+                elif issue_time is not None:
+                    from datetime import timedelta
+
+                    lo = (
+                        issue_time.replace(hour=0, minute=0, second=0)
+                        if self.date_only
+                        else issue_time - timedelta(minutes=self.window_minutes)
+                    )
+                    hi = (
+                        lo + timedelta(days=1)
+                        if self.date_only
+                        else issue_time + timedelta(minutes=self.window_minutes)
+                    )
+                    notification = [
+                        item
+                        for item in notification
+                        if item.get("time") and lo <= item["time"] <= hi
+                    ]
+                known = {
+                    (item.get("full_path"), item.get("line"), item.get("name"))
+                    for item in point_incidents
+                }
+                point_incidents.extend(
+                    item
+                    for item in notification
+                    if (item["full_path"], item["line"], item["name"]) not in known
+                )
+                point_incidents = classify_link_incidents(
+                    point_incidents, relevant_content
+                )
                 point_incidents = [
                     item
                     for item in point_incidents

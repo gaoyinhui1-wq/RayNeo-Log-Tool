@@ -6,6 +6,10 @@ import sys
 
 def main():
     try:
+        if "--job-service" in sys.argv[1:]:
+            from rayneo.job_process import serve
+
+            return serve(sys.argv[sys.argv.index("--job-service") + 1])
         if "--smoke-test" in sys.argv[1:]:
             from rayneo.smoke_test import main as run_check
 

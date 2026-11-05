@@ -32,27 +32,31 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QTabBar,
 )
-from PyQt6.QtCore import Qt, QDate, QTime, QDateTime, QEvent
+from PyQt6.QtCore import Qt, QDate, QTime, QDateTime, QEvent, QTimer
 from PyQt6.QtGui import QFont, QColor, QAction
-from PyQt6.QtWidgets import QTableView, QDialog, QDialogButtonBox
+from PyQt6.QtWidgets import QTableView, QDialog, QDialogButtonBox, QToolBar
 from PyQt6.QtCore import QAbstractTableModel, QModelIndex
 from PyQt6.QtGui import QBrush
 from . import rules as rule_config
 from .dialogs import InputDialog
 from .background import DecryptExportThread, FileReadThread, PreviewOpenThread
 from .rules import open_rules_file
-from .search import FindNextThread, MatchResultModel, MatchSearchThread
+from .search import MatchResultModel
 from .matching import SearchSpec
 from .result_delegate import MatchHighlightDelegate
-from .viewer import VSCodeReportHighlighter, VirtualLogViewer
+from .viewer import VirtualLogViewer
 
 
 class AppWindow(QMainWindow):
-    """Compact Notepad++-style UI. All slow analysis/search/decode jobs are QThreads."""
+    """Notepad-style viewer with isolated analysis/search and background I/O."""
 
     def __init__(self):
         super().__init__()
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setWindowTitle("RayNeo Log Tool")
+        from .app_assets import application_icon
+
+        self.setWindowIcon(application_icon())
         screen = (
             QApplication.screenAt(
                 QApplication.primaryScreen().availableGeometry().center()
@@ -95,6 +99,10 @@ class AppWindow(QMainWindow):
         self.device_info = {}
         self._analysis_pending = False
         self._preview_pending = False
+        from .job_process import JobSession
+
+        self._analysis_session = JobSession()
+        self.last_analysis_metadata = {}
         self.worker = None
         self.search_worker = None
         self.find_worker = None
@@ -115,6 +123,10 @@ class AppWindow(QMainWindow):
         self.ui_font = QFont("Segoe UI", 9)
         self.code_font = QFont("Consolas", 9)
         self.build_ui()
+        self._task_ui_timer = QTimer(self)
+        self._task_ui_timer.setInterval(150)
+        self._task_ui_timer.timeout.connect(self._refresh_cancel_state)
+        self._task_ui_timer.start()
         self.update_time_widgets()
         self.setStyleSheet(self.styles())
         self._temp_dirs = set()
@@ -172,15 +184,18 @@ class AppWindow(QMainWindow):
         tool_col = QVBoxLayout(tools)
         tool_col.setContentsMargins(7, 4, 7, 4)
         tool_col.setSpacing(4)
-        actions_row = QHBoxLayout()
-        actions_row.setSpacing(5)
+        actions_row = QToolBar("功能", self)
+        actions_row.setObjectName("MainToolbar")
+        actions_row.setMovable(False)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, actions_row)
 
         def add_btn(title, fn, tip=None):
-            btn = QPushButton(title)
-            btn.clicked.connect(fn)
-            btn.setToolTip(tip or title)
-            actions_row.addWidget(btn)
-            return btn
+            action = actions_row.addAction(title)
+            action.triggered.connect(fn)
+            action.setToolTip(tip or title)
+            button = actions_row.widgetForAction(action)
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+            return button
 
         # 点击按钮直接弹出来源选择，不依赖隐藏的小箭头/菜单。
         self.btn_open = add_btn(
@@ -191,6 +206,12 @@ class AppWindow(QMainWindow):
         self.btn_open.setObjectName("OpenButton")
         self.btn_analyze = add_btn("▶ 开始分析", self.reanalyze, "F5 启动异常分析")
         self.btn_analyze.setObjectName("AnalyzeButton")
+        self.btn_cancel = add_btn("取消任务", self.cancel_tasks)
+        self.btn_cancel.setEnabled(False)
+        self.btn_report = add_btn("查看报告", self.show_report)
+        self.btn_export = add_btn("导出报告", self.export_analysis)
+        self.btn_float_search = add_btn("悬浮搜索", self.toggle_search_float)
+        self.btn_float_results = add_btn("悬浮结果", self.toggle_results_float)
         self.btn_decrypt = add_btn(
             "本地解密 / 解压",
             self.open_decrypt_dialog,
@@ -202,8 +223,7 @@ class AppWindow(QMainWindow):
         self.btn_find.setObjectName("SearchButton")
         self.btn_search = add_btn("筛选", self.show_filter, "Ctrl+Shift+F")
         self.btn_search.setObjectName("FilterButton")
-        actions_row.addStretch(1)
-        tool_col.addLayout(actions_row)
+        add_btn("复制报告", self.copy_analysis)
         scope_row = QHBoxLayout()
         scope_row.setSpacing(5)
         scope_row.addWidget(QLabel("分析范围"))
@@ -217,6 +237,12 @@ class AppWindow(QMainWindow):
         self.btn_rules.setObjectName("RulesButton")
         self.btn_rules.clicked.connect(self.open_rule_editor)
         scope_row.addWidget(self.btn_rules)
+        self.chk_auto_analyze = QCheckBox("导入后自动分析并显示报告")
+        self.chk_auto_analyze.setChecked(True)
+        scope_row.addWidget(self.chk_auto_analyze)
+        self.chk_float_results = QCheckBox("筛选结果自动悬浮")
+        self.chk_float_results.setChecked(True)
+        scope_row.addWidget(self.chk_float_results)
         scope_row.addStretch(1)
         tool_col.addLayout(scope_row)
         self.lbl_status = QLabel("准备就绪")
@@ -314,7 +340,12 @@ class AppWindow(QMainWindow):
         el.setSpacing(0)
         self.viewer = VirtualLogViewer(container)
         el.addWidget(self.viewer, 1)
-        self.search_box = QFrame(self.viewer)
+        from .panels import SearchDock
+
+        self.search_dock = SearchDock(self)
+        self.search_box = QFrame(self.search_dock)
+        self.search_dock.setWidget(self.search_box)
+        self.addDockWidget(Qt.DockWidgetArea.TopDockWidgetArea, self.search_dock)
         self.search_box.setObjectName("SearchBar")
         sl = QHBoxLayout(self.search_box)
         sl.setContentsMargins(6, 4, 6, 4)
@@ -343,9 +374,11 @@ class AppWindow(QMainWindow):
         sl.addWidget(self.btn_clear_filter)
         bclose = QPushButton("×")
         bclose.setFixedWidth(28)
-        bclose.clicked.connect(self.search_box.hide)
+        bclose.setText("悬浮")
+        bclose.setFixedWidth(48)
+        bclose.clicked.connect(self.toggle_search_float)
         sl.addWidget(bclose)
-        self.search_box.hide()
+        self.search_box.show()
         self.viewer.installEventFilter(self)
         self.search_box.installEventFilter(self)
 
@@ -389,7 +422,7 @@ class AppWindow(QMainWindow):
         self.txt_analysis.setReadOnly(True)
         self.txt_analysis.setUndoRedoEnabled(False)
         self.txt_analysis.setFont(QFont("Segoe UI", 10))
-        self.txt_analysis.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self.txt_analysis.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self.report_highlighter = None  # 首次分析完成时才创建高亮器，减少首次启动开销
         self.results.addTab(self.txt_analysis, "分析报告")
         self.tbl_incidents = QTableView()
@@ -456,7 +489,6 @@ class AppWindow(QMainWindow):
             and event.type() == QEvent.Type.KeyPress
             and event.key() == Qt.Key.Key_Escape
         ):
-            self.search_box.hide()
             self.viewer.setFocus()
             return True
         return super().eventFilter(obj, event)
@@ -464,11 +496,8 @@ class AppWindow(QMainWindow):
     def position_find_bar(self):
         if not hasattr(self, "search_box"):
             return
-        w = min(790, max(350, self.viewer.width() - 18))
-        self.search_box.setFixedWidth(w)
-        self.search_box.adjustSize()
-        self.search_box.move(max(5, self.viewer.width() - w - 17), 7)
-        self.search_box.raise_()
+        # Search has its own dock and no longer obscures source log rows.
+        self.search_dock.show()
 
     def show_find(self):
         self.search_scope.setCurrentIndex(0)
@@ -481,7 +510,8 @@ class AppWindow(QMainWindow):
     def _show_search_box(self):
         self.position_find_bar()
         self.search_box.show()
-        self.search_box.raise_()
+        self.search_dock.show()
+        self.search_dock.raise_()
         self.search_input.setFocus()
         self.search_input.selectAll()
 
@@ -570,6 +600,8 @@ class AppWindow(QMainWindow):
         self._find_generation += 1
         if self.search_worker and self.search_worker.isRunning():
             self.search_worker.requestInterruption()
+        self._analysis_session.stop()
+        self._report_file = None
         self._input_generation += 1
         self.last_open_paths = paths
         self.last_is_file_list = is_file_list
@@ -582,12 +614,16 @@ class AppWindow(QMainWindow):
         self.preview_worker.progress.connect(self.analysis_progress)
         self.preview_worker.completed.connect(self.preview_done)
         self._preview_pending = True
+        self.preview_worker.finished.connect(self._auto_analyze_after_import)
         self.preview_worker.start()
 
     def preview_done(self, result):
         self._preview_pending = False
         self.progress.hide()
         if result.get("error"):
+            if "已取消" in result["error"]:
+                self.lbl_status.setText("已取消导入")
+                return
             self.lbl_status.setText("打开失败")
             QMessageBox.warning(self, "打开失败", result["error"])
             return
@@ -620,6 +656,8 @@ class AppWindow(QMainWindow):
             self.list_files.item(row).setToolTip(path)
         self.has_analyzed = False
         self._full_report = ""
+        self._report_file = None
+        self._report_truncated = False
         self.btn_analyze.setText("▶ 开始分析")
         self.btn_analyze.setEnabled(True)
         self.action_analyze.setText("开始分析")
@@ -651,6 +689,90 @@ class AppWindow(QMainWindow):
             msg += f" | 解包提示 {len(result['notes'])} 条"
         self.lbl_status.setText(msg)
         self.statusBar().showMessage(msg)
+
+    def _auto_analyze_after_import(self):
+        if (
+            self.last_open_paths
+            and self._files_are_prepared
+            and self.chk_auto_analyze.isChecked()
+            and not self._closing
+        ):
+            self.reanalyze()
+
+    def _refresh_cancel_state(self):
+        running = any(
+            worker is not None and worker.isRunning()
+            for worker in (
+                self.worker,
+                self.search_worker,
+                self.find_worker,
+                self.preview_worker,
+                self.decrypt_worker,
+            )
+        )
+        self.btn_cancel.setEnabled(running)
+
+    def cancel_tasks(self):
+        for worker in (
+            self.worker,
+            self.search_worker,
+            self.find_worker,
+            self.preview_worker,
+            self.decrypt_worker,
+        ):
+            if worker is not None and worker.isRunning():
+                worker.requestInterruption()
+        self._analysis_session.stop()
+        self.statusBar().showMessage("正在取消后台任务，日志预览仍可使用")
+
+    def toggle_search_float(self):
+        self.search_dock.setFloating(not self.search_dock.isFloating())
+        self.search_dock.show()
+        self.search_dock.raise_()
+        self.search_dock.resize(900, 100)
+        self.search_input.setFocus()
+
+    def toggle_results_float(self):
+        dialog = getattr(self, "_results_dialog", None)
+        if dialog is not None:
+            dialog.close()
+            return
+        dialog = QDialog(self, Qt.WindowType.Tool)
+        dialog.setWindowTitle("筛选与分析结果")
+        dialog.resize(1080, 480)
+        panel = QVBoxLayout(dialog)
+        panel.setContentsMargins(0, 0, 0, 0)
+        panel.addWidget(self.results)
+        self._results_dialog = dialog
+
+        def restore(_result):
+            self._results_dialog = None
+            self.results.setParent(self.vsplit)
+            self.vsplit.addWidget(self.results)
+            self.results.show()
+            self.vsplit.setSizes([400, 180])
+
+        dialog.finished.connect(restore)
+        dialog.show()
+
+    def show_report(self):
+        if not hasattr(self, "_report_dialog"):
+            self._report_dialog = QDialog(self, Qt.WindowType.Tool)
+            self._report_dialog.setWindowTitle("分析报告")
+            self._report_dialog.resize(960, 620)
+            box = QVBoxLayout(self._report_dialog)
+            self._report_view = QPlainTextEdit()
+            self._report_view.setReadOnly(True)
+            self._report_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+            box.addWidget(self._report_view)
+            button = QPushButton("导出完整报告")
+            button.clicked.connect(self.export_analysis)
+            box.addWidget(button)
+        self._report_view.setPlainText(
+            self._report_preview() or "导入日志后开始分析，完成后在这里显示报告。"
+        )
+        self._report_dialog.show()
+        self._report_dialog.raise_()
 
     def _start_file_read(self, path):
         self._pending_selected_path = path
@@ -764,25 +886,35 @@ class AppWindow(QMainWindow):
         self.btn_open.setEnabled(False)
         self.btn_analyze.setEnabled(False)
         self.action_analyze.setEnabled(False)
-        from .analysis_worker import WorkerThread
+        from .job_process import AnalysisProcess
 
-        self.worker = WorkerThread(
-            paths,
-            is_file_list,
-            self.issue_times(),
-            window,
-            prepared=prepared,
+        request = dict(
+            operation="analysis",
+            paths=paths,
+            is_file_list=is_file_list,
+            issue_times=self.issue_times(),
+            window_minutes=window,
             analysis_mode=self.combo_mode.currentText(),
             range_start=start,
             range_end=end,
             already_prepared=self._files_are_prepared,
-            initial_texts=dict(self.raw_data),
             initial_notes=self._import_notes,
+            rules_path=str(rule_config.RULES_PATH),
         )
+        self.worker = AnalysisProcess(self._analysis_session, request)
         self.worker.progress.connect(self.analysis_progress)
         self.worker.finished.connect(self.analysis_done)
         self._analysis_pending = True
+        self.btn_cancel.setEnabled(True)
         self.worker.start()
+
+    def _report_preview(self):
+        text = getattr(self, "_full_report", "")
+        return text[:100000] + (
+            "\n\n界面仅预览前10万字，点击“导出报告”可保存完整报告。"
+            if len(text) > 100000 or getattr(self, "_report_truncated", False)
+            else ""
+        )
 
     def analysis_progress(self, value, msg):
         self.progress.setValue(value)
@@ -791,10 +923,14 @@ class AppWindow(QMainWindow):
 
     def analysis_done(self, data):
         self._analysis_pending = False
+        self.btn_cancel.setEnabled(False)
         self.progress.hide()
         self.btn_open.setEnabled(True)
         self.btn_analyze.setEnabled(True)
         self.action_analyze.setEnabled(True)
+        if data.get("cancelled"):
+            self.lbl_status.setText("已取消分析")
+            return
         if data.get("error"):
             self.lbl_status.setText("分析失败")
             QMessageBox.warning(self, "分析失败", str(data["error"]))
@@ -803,7 +939,11 @@ class AppWindow(QMainWindow):
         # Avoid destroying/reconstructing the editor until the worker is finished.
         if data.get("preprocess_dir"):
             self._temp_dirs.add(data["preprocess_dir"])
-        self.raw_data = data.get("files_content", {})
+        self.raw_data = OrderedDict()
+        self.last_analysis_metadata = {
+            "reused_cache": data.get("reused_cache"),
+            "process_token": data.get("prepared_payload", {}).get("process_token"),
+        }
         self._line_index_cache.clear()
         self.prepared_payload = data.get("prepared_payload")
         self.incidents = data.get("incidents", [])
@@ -813,13 +953,12 @@ class AppWindow(QMainWindow):
         self.btn_analyze.setText("↻ 重新分析")
         self.action_analyze.setText("重新分析")
         self._full_report = data.get("report_text", "")
-        self.txt_analysis.setPlainText(self._full_report[:2_000_000])
-        if self.report_highlighter is None:
-            self.report_highlighter = VSCodeReportHighlighter(
-                self.txt_analysis.document()
-            )
+        self._report_file = data.get("report_path")
+        self._report_truncated = data.get("report_truncated", False)
+        self.txt_analysis.setPlainText(self._report_preview())
         self.file_list_data = sorted(
-            self.raw_data, key=lambda p: os.path.basename(p).lower()
+            data.get("file_paths", data.get("files_content", {})),
+            key=lambda p: os.path.basename(p).lower(),
         )
         self._find_generation += 1
         self.find_key = None
@@ -857,12 +996,18 @@ class AppWindow(QMainWindow):
         tail = f" | {elapsed:.1f}s" if isinstance(elapsed, (float, int)) else ""
         errs = data.get("analysis_errors") or []
         message = (
-            f"{len(self.file_list_data)} 文件 | {len(self.incidents)} 异常"
+            f"{len(self.file_list_data)} 文件 | {data.get('persistent_count', 0)} 持续未恢复 | {data.get('incident_count_total', len(self.incidents))} 条证据"
+            + (
+                " | 列表仅显示前2万条，完整内容请导出报告"
+                if data.get("incident_count_total", 0) > len(self.incidents)
+                else ""
+            )
             + (f" | {len(errs)} 文件分析失败" if errs else "")
             + tail
         )
         self.lbl_status.setText(message)
         self.statusBar().showMessage(message)
+        self.show_report()
         if errs:
             self.lbl_status.setToolTip("\n".join(errs[:30]))
 
@@ -881,11 +1026,11 @@ class AppWindow(QMainWindow):
                 return 0 if p.isValid() else len(self.rows)
 
             def columnCount(self, p=QModelIndex()):
-                return 3
+                return 4
 
             def headerData(self, c, o, r=Qt.ItemDataRole.DisplayRole):
                 return (
-                    ["时间", "来源", "问题"][c]
+                    ["时间", "状态", "来源", "问题"][c]
                     if r == Qt.ItemDataRole.DisplayRole
                     and o == Qt.Orientation.Horizontal
                     else None
@@ -903,6 +1048,8 @@ class AppWindow(QMainWindow):
                             else "--:--:--"
                         )
                     if i.column() == 1:
+                        return x.get("status", "失败证据")
+                    if i.column() == 2:
                         return (
                             str(x.get("file", ""))
                             + ":"
@@ -911,10 +1058,14 @@ class AppWindow(QMainWindow):
                     return x.get("name", "异常")
                 if (
                     r == Qt.ItemDataRole.ForegroundRole
-                    and i.column() == 2
+                    and i.column() in (1, 3)
                     and x.get("level") == "HIGH"
                 ):
                     return QBrush(QColor("#CF222E"))
+                if r == Qt.ItemDataRole.ForegroundRole and i.column() in (1, 3):
+                    return QBrush(
+                        QColor("#267047" if x.get("status") == "已恢复" else "#8A671C")
+                    )
                 return None
 
         previous_model = self.tbl_incidents.model()
@@ -924,7 +1075,8 @@ class AppWindow(QMainWindow):
         if previous_model is not None:
             previous_model.deleteLater()
         self.tbl_incidents.setColumnWidth(0, 100)
-        self.tbl_incidents.setColumnWidth(1, 300)
+        self.tbl_incidents.setColumnWidth(1, 120)
+        self.tbl_incidents.setColumnWidth(2, 300)
         self.tbl_incidents.horizontalHeader().setStretchLastSection(True)
         self.results.setTabText(1, f"异常定位 ({len(self.incident_rows)})")
 
@@ -1024,9 +1176,10 @@ class AppWindow(QMainWindow):
             self.find_offset = 0
         self._find_generation += 1
         generation = self._find_generation
-        w = FindNextThread(
+        from .job_process import FindProcess
+
+        w = FindProcess(
             self.current_file,
-            self.raw_data[self.current_file],
             query,
             self.find_offset,
             self.search_regex.isChecked(),
@@ -1079,9 +1232,12 @@ class AppWindow(QMainWindow):
         self.results.setTabText(2, "筛选中...")
         self._search_generation += 1
         epoch = self._search_generation
-        worker = MatchSearchThread(
+        from .job_process import SearchProcess
+
+        worker = SearchProcess(
             data, query, self.search_regex.isChecked(), self.search_case.isChecked()
         )
+        self.btn_cancel.setEnabled(True)
         self.search_worker = worker
         worker.completed.connect(
             lambda rows, trunc: (
@@ -1117,6 +1273,7 @@ class AppWindow(QMainWindow):
         self.btn_filter.setEnabled(True)
 
     def search_finished(self, rows, truncated):
+        self.btn_cancel.setEnabled(False)
         self.btn_filter.setEnabled(True)
         self.match_model.set_rows(rows)
         self._filter_highlights_by_file = self.match_model.source_highlights()
@@ -1132,6 +1289,12 @@ class AppWindow(QMainWindow):
         label = f"筛选结果 ({len(rows):,}" + ("，已达到上限)" if truncated else ")")
         self.results.setTabText(2, label)
         self.results.setCurrentIndex(2)
+        if spec is not None and self.chk_float_results.isChecked():
+            if getattr(self, "_results_dialog", None) is None:
+                self.toggle_results_float()
+            else:
+                self._results_dialog.show()
+                self._results_dialog.raise_()
         self.statusBar().showMessage(
             f"匹配 {len(rows):,} 行"
             + (
@@ -1291,10 +1454,14 @@ class AppWindow(QMainWindow):
         except Exception as ex:
             QMessageBox.warning(self, "规则编辑", str(ex))
 
+    def _complete_report(self):
+        path = getattr(self, "_report_file", None)
+        if path and Path(path).is_file():
+            return Path(path).read_text(encoding="utf-8")
+        return getattr(self, "_full_report", self.txt_analysis.toPlainText())
+
     def copy_analysis(self):
-        QApplication.clipboard().setText(
-            getattr(self, "_full_report", self.txt_analysis.toPlainText())
-        )
+        QApplication.clipboard().setText(self._complete_report())
         self.statusBar().showMessage("已复制分析报告")
 
     def export_analysis(self):
@@ -1305,7 +1472,7 @@ class AppWindow(QMainWindow):
         )
         if path:
             Path(path).write_text(
-                getattr(self, "_full_report", self.txt_analysis.toPlainText()),
+                self._complete_report(),
                 encoding="utf-8",
             )
             self.statusBar().showMessage("报告已导出 " + path)
@@ -1326,6 +1493,7 @@ class AppWindow(QMainWindow):
             event.acceptProposedAction()
 
     def closeEvent(self, event):
+        self._closing = True
         running = [
             w
             for w in (
@@ -1345,7 +1513,10 @@ class AppWindow(QMainWindow):
                 "后台任务尚未结束，正在请求停止；处理完成后再关闭"
             )
             event.ignore()
+            QTimer.singleShot(75, self.close)
             return
+        self._analysis_session.stop()
         for folder in self._temp_dirs:
             shutil.rmtree(folder, ignore_errors=True)
+        self._task_ui_timer.stop()
         super().closeEvent(event)

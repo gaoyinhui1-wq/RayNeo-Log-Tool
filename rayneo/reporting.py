@@ -1,3 +1,4 @@
+import io
 import os
 import re
 from datetime import datetime
@@ -555,7 +556,13 @@ def _smart_incident_groups(items):
     normal = []
     for item in ordered:
         if str(item.get("rule_source", "")).startswith("external"):
-            external[item.get("similarity_key") or item.get("name")].append(item)
+            external[
+                (
+                    item.get("similarity_key") or item.get("name"),
+                    item.get("status"),
+                    item.get("device_id"),
+                )
+            ].append(item)
         else:
             normal.append(item)
 
@@ -563,7 +570,11 @@ def _smart_incident_groups(items):
     used = set()
     for item in ordered:
         if str(item.get("rule_source", "")).startswith("external"):
-            key = item.get("similarity_key") or item.get("name")
+            key = (
+                item.get("similarity_key") or item.get("name"),
+                item.get("status"),
+                item.get("device_id"),
+            )
             if key in used:
                 continue
             used.add(key)
@@ -578,6 +589,8 @@ def _smart_incident_groups(items):
                 and last_t
                 and item.get("full_path") == last.get("full_path")
                 and item.get("name") == last.get("name")
+                and item.get("status") == last.get("status")
+                and item.get("device_id") == last.get("device_id")
                 and 0 <= (t - last_t).total_seconds() <= 12
             ):
                 groups[-1].append(item)
@@ -624,6 +637,11 @@ def _raw_evidence_index(files_content, incidents, range_start=None, range_end=No
         p = incident.get("full_path")
         if p in files_content and isinstance(incident.get("line"), int):
             anchors[p].add(incident["line"])
+        for location_path, line_index, _expected in incident.get(
+            "evidence_locations", []
+        ):
+            if location_path in files_content:
+                anchors[location_path].add(line_index)
         for raw in (incident.get("evidence") or []) + (
             incident.get("smart_evidence") or []
         ):
@@ -656,7 +674,8 @@ def _raw_evidence_index(files_content, incidents, range_start=None, range_end=No
         if not missing:
             continue
         sought = set(missing)
-        for i, line in enumerate(files_content[path].splitlines()):
+        for i, line in enumerate(io.StringIO(files_content[path])):
+            line = line.rstrip("\r\n")
             if i not in sought:
                 continue
             t = parse_log_time(line)
@@ -726,12 +745,9 @@ def _verified_evidence_for_item(
             content = files_content.get(path)
             if content is None:
                 continue
-            r = next(
-                (r for r in _build_fast_records(content) if r.get("index") == line_idx),
-                None,
-            )
-            if r is not None and r["line"] == expected:
-                verified.append((path, line_idx + 1, expected, r.get("effective_time")))
+            record = anchors.get((path, line_idx))
+            if record is not None and record[2] == expected:
+                verified.append(record)
         return verified
     path = item.get("full_path")
     anchor_time = item.get("time")
@@ -865,7 +881,10 @@ def format_smart_report(
         total = sum(x.get("occurrences", 1) for x in group)
         suffix = f"（同类 {total} 次，已合并）" if total > 1 else ""
         out.extend(
-            ["", f"{idx}、{timestamp}  {primary.get('name', '未知异常')}{suffix}"]
+            [
+                "",
+                f"{idx}、{timestamp}  [{primary.get('status', '失败证据')}] {primary.get('name', '未知异常')}{suffix}",
+            ]
         )
         out.append("问题分析：" + _brief_issue_analysis(primary))
         out.append("日志证据：")

@@ -1,3 +1,4 @@
+from pathlib import Path
 import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -86,6 +87,7 @@ class SpanTests(unittest.TestCase):
 class FilterHighlightTests(GuiCase):
     def load(self, text, name="a.log"):
         path = str(self.root / name)
+        Path(path).write_bytes(text.encode("utf-8"))
         self.win.file_list_data = [path]
         self.win.raw_data = {path: text}
         self.win._line_index_cache[path] = _line_offsets(text)
@@ -240,6 +242,7 @@ class FilterHighlightTests(GuiCase):
         self.win.file_list_data = [a, b]
         self.win.raw_data = {a: "disconnect here", b: "nothing here"}
         for path, text in self.win.raw_data.items():
+            Path(path).write_bytes(text.encode("utf-8"))
             self.win._line_index_cache[path] = _line_offsets(text)
         self.win.select_file_by_path(a)
         self.filter()
@@ -256,6 +259,7 @@ class FilterHighlightTests(GuiCase):
         self.win.file_list_data = [a, b]
         self.win.raw_data = {a: "ERR12 ERR34", b: "prefix ERR56"}
         for path, text in self.win.raw_data.items():
+            Path(path).write_bytes(text.encode("utf-8"))
             self.win._line_index_cache[path] = _line_offsets(text)
         self.win.select_file_by_path(a)
         self.win.search_scope.setCurrentIndex(1)
@@ -287,7 +291,9 @@ class FilterHighlightTests(GuiCase):
         self.load("😀 <tag>& disconnect " + "x" * 100000)
         self.filter()
         self.assertFalse(self.cell_image(False).isNull())
-        self.assertEqual(len(self.win.match_model.rows[0][2]), 100020)
+        self.assertLess(len(self.win.match_model.rows[0][2]), 8300)
+        self.assertIn("长行", self.win.match_model.rows[0][2])
+        self.assertEqual(len(self.win.viewer._log), 100020)
         self.filter(r"(?=disconnect)", regex=True)
         image = self.cell_image(True)
         self.assertGreater(self.color_count(image, HIT_FOREGROUND), 5)

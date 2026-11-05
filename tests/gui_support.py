@@ -6,6 +6,7 @@ import tempfile
 import time
 import unittest
 from PyQt6.QtWidgets import QApplication
+from PyQt6.QtCore import QEvent
 from rayneo.window import AppWindow
 
 
@@ -21,6 +22,7 @@ class GuiCase(unittest.TestCase):
         # return an 8.3 path such as RUNNER~1. Use one physical path identity.
         self.root = Path(self.temp.name).resolve()
         self.win = AppWindow()
+        self.win.chk_auto_analyze.setChecked(False)
         self.win.show()
         self.app.processEvents()
         self.addCleanup(self.finish)
@@ -36,6 +38,7 @@ class GuiCase(unittest.TestCase):
         )
         self.win.close()
         self.app.processEvents()
+        self.app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
     def wait(self, condition, timeout=10):
         deadline = time.monotonic() + timeout

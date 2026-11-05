@@ -491,7 +491,21 @@ def _build_fast_records(text):
         return cached["records"]
     from .indexing import candidate_starts
 
-    tokens = list(FAST_INDEX_TOKENS2)
+    tokens = list(FAST_INDEX_TOKENS2) + [
+        "spp",
+        "rfcomm",
+        "ancs",
+        "notification",
+        "通知",
+        "sharesystemnotifications",
+        "deviceid",
+        "device_id",
+        "timeout timer",
+        "超时计时器",
+        "poweredoff",
+        "manual",
+        "disconnectsource",
+    ]
     regex_terms = []
     for rule in rule_config.EXTERNAL_RULES:
         tokens.extend(rule.get("索引词", []))

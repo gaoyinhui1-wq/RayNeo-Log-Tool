@@ -2779,7 +2779,7 @@ def _nearby_extra_logs(files_content, incident, regex, radius=40, max_lines=4):
     return out
 
 
-SMART_RULE_VERSION = 15
+SMART_RULE_VERSION = 16
 
 
 SMART_FAMILIES = (
