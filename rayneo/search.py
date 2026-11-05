@@ -18,6 +18,8 @@ def scan_log_matches(
     max_results=25000,
     cancelled=None,
     include_spans=False,
+    preview_chars=None,
+    preview_budget=8 * 1024 * 1024,
 ):
     """Line-streaming search; only one pass, never builds a lowercased copy of all logs."""
     if not query:
@@ -30,6 +32,7 @@ def scan_log_matches(
     spec = SearchSpec(query, regex, case_sensitive)
     highlight_pattern = spec.compile() if include_spans else None
     matches = HighlightedRows(spec) if include_spans else []
+    preview_used = 0
     for path, content in data.items():
         if content is None:
             content = read_text_file(path)
@@ -52,7 +55,13 @@ def scan_log_matches(
                         return matches, False
                     matches.spans.append(spans)
                     matches.first_matches.append(highlight_pattern.search(line).span())
-                matches.append((path, lineno, line))
+                shown = line
+                if preview_chars is not None:
+                    limit = min(preview_chars, max(0, preview_budget - preview_used))
+                    preview_used += min(len(line), limit)
+                    if len(line) > limit:
+                        shown = line[:limit] + "…（长行或预览限额，双击查看原文）"
+                matches.append((path, lineno, shown))
                 if len(matches) >= max_results:
                     return matches, True
     return matches, False

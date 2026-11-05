@@ -22,6 +22,20 @@ from gui_support import GuiCase
 
 
 class SpanTests(unittest.TestCase):
+    def test_preview_budget_is_bounded_and_source_match_offsets_survive(self):
+        raw = "x" * 1000 + "needle"
+        rows, _ = scan_log_matches(
+            {"large.log": (raw + "\n") * 10},
+            "needle",
+            include_spans=True,
+            preview_chars=128,
+            preview_budget=200,
+        )
+        self.assertEqual(len(rows), 10)
+        self.assertLess(sum(len(row[2]) for row in rows), 500)
+        self.assertEqual(rows.first_matches, [(1000, 1006)] * 10)
+        self.assertEqual(rows.spans, [((1000, 1006),)] * 10)
+
     def test_unicode_map_is_source_exact_and_skips_plain_text(self):
         text = "😀 中文 😀 disconnect"
         mapping = utf16_index_map(text)

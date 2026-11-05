@@ -71,7 +71,9 @@ class JobSession:
         root = Path(folder.name)
         (root / "response.jsonl").touch()
         sender = (root / "request.jsonl").open("w", encoding="utf-8", buffering=1)
-        receiver = (root / "response.jsonl").open("r", encoding="utf-8")
+        # Read bytes until a whole JSON record arrives. A writer can stop in the
+        # middle of a Chinese/emoji UTF-8 sequence before its next flush.
+        receiver = (root / "response.jsonl").open("rb")
         command = (
             [sys.executable, "--job-service", str(root)]
             if getattr(sys, "frozen", False)
@@ -127,7 +129,7 @@ class JobSession:
                     json.dumps(request, ensure_ascii=False, default=encode) + "\n"
                 )
                 sender.flush()
-                pending = ""
+                pending = b""
                 while True:
                     if expected != self.generation:
                         raise JobCancelled()
@@ -142,10 +144,10 @@ class JobSession:
                             f"后台任务退出（代码 {process.poll()}）；可重新分析或缩小日志范围。"
                         )
                     pending += line
-                    if not pending.endswith("\n"):
+                    if not pending.endswith(b"\n"):
                         continue
                     message = json.loads(pending, object_hook=decode)
-                    pending = ""
+                    pending = b""
                     if message.get("kind") == "progress":
                         if progress:
                             progress(message["value"], message["message"])
@@ -299,18 +301,18 @@ def serve(directory):
         )
 
     root = Path(directory)
-    input_stream = (root / "request.jsonl").open("r", encoding="utf-8")
+    input_stream = (root / "request.jsonl").open("rb")
     output_stream = (root / "response.jsonl").open("a", encoding="utf-8", buffering=1)
-    pending = ""
+    pending = b""
     while True:
         line = input_stream.readline()
         if not line:
             time.sleep(0.025)
             continue
         pending += line
-        if not pending.endswith("\n"):
+        if not pending.endswith(b"\n"):
             continue
-        line, pending = pending, ""
+        line, pending = pending, b""
         try:
             request = json.loads(line, object_hook=decode)
             operation = request.pop("operation")
@@ -356,7 +358,26 @@ def serve(directory):
                         x.get("status") == "持续未恢复"
                         for x in data.get("incidents", [])
                     )
-                    data["incidents"] = data.get("incidents", [])[:20000]
+                    # The table needs locations/status, not repeated raw evidence
+                    # blocks. Full evidence remains in the exported report.
+                    fields = {
+                        "name",
+                        "file",
+                        "full_path",
+                        "line",
+                        "time",
+                        "level",
+                        "status",
+                        "channel",
+                        "device_id",
+                        "cause_code",
+                        "custom_analysis",
+                        "confidence",
+                    }
+                    data["incidents"] = [
+                        {k: v for k, v in item.items() if k in fields}
+                        for item in data.get("incidents", [])[:20000]
+                    ]
                     data["prepared_payload"] = {"process_token": os.getpid()}
                     # Keep bulk text/index caches in the worker, never duplicate
                     # all imported logs or reports in the GUI process.
@@ -372,23 +393,14 @@ def serve(directory):
                     request["regex"],
                     request["case_sensitive"],
                     include_spans=True,
+                    preview_chars=8192,
                 )
                 from dataclasses import asdict
 
-                previews = [
-                    (
-                        path,
-                        number,
-                        text
-                        if len(text) <= 8192
-                        else text[:8192] + "…（长行，双击查看原文）",
-                    )
-                    for path, number, text in rows
-                ]
                 send(
                     "result",
                     data={
-                        "rows": previews,
+                        "rows": rows,
                         "spec": asdict(rows.spec),
                         "spans": rows.spans,
                         "first_matches": rows.first_matches,

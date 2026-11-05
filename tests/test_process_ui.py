@@ -2,6 +2,9 @@
 
 import os
 import time
+import threading
+import tempfile
+from unittest.mock import Mock
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,6 +17,32 @@ from rayneo.job_process import AnalysisProcess, JobSession
 
 
 class ProcessUiTests(GuiCase):
+    def test_private_transport_reassembles_partial_unicode_records(self):
+        session = JobSession()
+        self.addCleanup(session.stop)
+        folder = tempfile.TemporaryDirectory()
+        root = Path(folder.name)
+        output = root / "response.jsonl"
+        output.touch()
+        sender = (root / "request.jsonl").open("w", encoding="utf-8")
+        receiver = output.open("rb")
+        session._transport = (folder, sender, receiver)
+        session.process = Mock()
+        session.process.poll.return_value = None
+        result = '{"kind":"result","data":{"text":"中文😀"}}\n'.encode("utf-8")
+        cut = result.index("中".encode("utf-8")) + 1
+
+        def publish():
+            with output.open("wb", buffering=0) as stream:
+                stream.write(result[:cut])
+                time.sleep(0.06)
+                stream.write(result[cut:])
+
+        writer = threading.Thread(target=publish)
+        writer.start()
+        self.assertEqual(session.execute({}), {"text": "中文😀"})
+        writer.join()
+
     def source(self, text):
         path = self.root / "events.log"
         path.write_text(text, encoding="utf-8")
