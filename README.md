@@ -16,6 +16,8 @@
 
 这些规则通过合成场景验证；尚未获得截图对应原始日志，因此没有真实误判率或设备覆盖率的统计。失败事件仍保留证据，并不会仅因为降级为“待核实”就被视为正常。大型任务仍会占用 CPU 和分析进程内存，独立进程不能保证所有大小的日志都在固定时间内完成。
 
+合成大日志单次检查：5 个不同文件，合计 62,400,850 字节、600,015 行；本机 Linux / Qt offscreen 首次分析 2.857 秒、缓存重分析 1.747 秒、全文件关键词筛选 0.760 秒。分析期间 10 ms 界面计时器的最大回调间隔为 29.4 ms。此样例以普通心跳行为主，不代表复杂真实日志性能，也没有与旧版做等条件比较。[测量记录](docs/performance-sample-1.4.json)，可用 `python tools/benchmark_responsiveness.py` 重测。
+
 最新 Windows 程序包请从 [Build Windows EXE](https://github.com/gaoyinhui1-wq/RayNeo-Log-Tool/actions/workflows/build-windows.yml) 的 **1.4.0 成功运行记录**下载 `RayNeo-Log-Tool-Windows-x64`，完整解压后使用。下方 1.3.2 链接是旧版，不含上述更新。
 
 ## 1.3.2 Windows 自动构建（历史版本）

@@ -32,6 +32,8 @@ class GuiRegressionTests(GuiCase):
         self.assertIn(Path.home().resolve(), paths)
 
     def test_top_decrypt_button_opens_existing_local_dialog(self):
+        self.win.resize(570, 500)
+        self.app.processEvents()
         self.assertTrue(self.win.btn_decrypt.isVisible())
         with patch(
             "rayneo.window.QDialog.exec", return_value=QDialog.DialogCode.Rejected

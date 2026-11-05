@@ -208,16 +208,22 @@ class AppWindow(QMainWindow):
         self.btn_analyze.setObjectName("AnalyzeButton")
         self.btn_cancel = add_btn("取消任务", self.cancel_tasks)
         self.btn_cancel.setEnabled(False)
-        self.btn_report = add_btn("查看报告", self.show_report)
-        self.btn_export = add_btn("导出报告", self.export_analysis)
-        self.btn_float_search = add_btn("悬浮搜索", self.toggle_search_float)
-        self.btn_float_results = add_btn("悬浮结果", self.toggle_results_float)
         self.btn_decrypt = add_btn(
             "本地解密 / 解压",
             self.open_decrypt_dialog,
             "选择本地日志文件或文件夹，解密/解压到指定目录（Ctrl+Shift+D）",
         )
         self.btn_decrypt.setObjectName("DecryptButton")
+        # Keep import, analysis, cancel and decoding visible even at 570 px.
+        self.addToolBarBreak(Qt.ToolBarArea.TopToolBarArea)
+        actions_row = QToolBar("查看与搜索", self)
+        actions_row.setObjectName("ViewToolbar")
+        actions_row.setMovable(False)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, actions_row)
+        self.btn_report = add_btn("查看报告", self.show_report)
+        self.btn_export = add_btn("导出报告", self.export_analysis)
+        self.btn_float_search = add_btn("悬浮搜索", self.toggle_search_float)
+        self.btn_float_results = add_btn("悬浮结果", self.toggle_results_float)
         self.has_analyzed = False
         self.btn_find = add_btn("查找", self.show_find, "Ctrl+F")
         self.btn_find.setObjectName("SearchButton")

@@ -1,0 +1,44 @@
+{
+  "bytes": 62400850,
+  "lines": 600015,
+  "measurements": [
+    {
+      "phase": "import_preview",
+      "seconds": 0.095,
+      "qt_ticks": 6,
+      "max_qt_gap_ms": 46.1
+    },
+    {
+      "phase": "analysis",
+      "seconds": 2.857,
+      "qt_ticks": 284,
+      "max_qt_gap_ms": 29.4
+    },
+    {
+      "phase": "repeat_analysis",
+      "seconds": 1.747,
+      "qt_ticks": 172,
+      "max_qt_gap_ms": 34.7
+    },
+    {
+      "phase": "filter_all",
+      "seconds": 0.76,
+      "qt_ticks": 76,
+      "max_qt_gap_ms": 10.7
+    },
+    {
+      "imported_files": 5,
+      "results": 5,
+      "incidents": 5,
+      "statuses": [
+        "\u5df2\u6062\u590d",
+        "\u5df2\u6062\u590d",
+        "\u5df2\u6062\u590d",
+        "\u5df2\u6062\u590d",
+        "\u5df2\u6062\u590d"
+      ],
+      "reused_cache": true,
+      "gui_cached_files": 1
+    }
+  ]
+}
