@@ -125,6 +125,7 @@ class AppWindow(QMainWindow):
         self.find_offset = 0
         self._search_generation = 0
         self._search_for_find = False
+        self._filter_split_initialized = False
         self._filter_highlights_by_file = {}
         self._closing = False
         self._files_are_prepared = False
@@ -1411,6 +1412,16 @@ class AppWindow(QMainWindow):
         self.btn_filter.setEnabled(False)
         self.results.setCurrentIndex(2)
         self.results.show()
+        if (
+            not self._filter_split_initialized
+            and self.vsplit.indexOf(self.results) >= 0
+        ):
+            self._filter_split_initialized = True
+            viewer_height, results_height = self.vsplit.sizes()
+            total_height = viewer_height + results_height
+            target = min(230, total_height * 45 // 100)
+            if results_height < target:
+                self.vsplit.setSizes([total_height - target, target])
         self.results.setTabText(2, "筛选中...")
         self._search_generation += 1
         epoch = self._search_generation

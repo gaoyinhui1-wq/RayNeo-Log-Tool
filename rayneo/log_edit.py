@@ -252,10 +252,12 @@ class LogEditDialog(QDialog):
 
     def _save(self, target):
         replacement = self.editor.document().toRawText().replace("\u2029", "\n")
-        start, expected, edited = _changed_range(self.original, replacement)
+        display_text = self.original.replace("\u2029", "\n")
+        start, expected, edited = _changed_range(display_text, replacement)
         if not expected and not edited:
             self.editor.document().setModified(False)
             return
+        expected = self.original[start : start + len(expected)]
         self.parent()._cancel_search_for_log_save()
         self.destination = target
         self.worker = LogSaveThread(
