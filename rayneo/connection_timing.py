@@ -46,6 +46,11 @@ RECONNECT_DONE = re.compile(
     r"|\b(?:(?:auto|manual)[_ -]?)?reconnect\s+(?:success(?:ful)?|succeeded)\b|(?:自动|手动)?回连成功",
     re.I,
 )
+ATTEMPT_SKIPPED = re.compile(
+    r"\b(pair(?:ing)?|(?:(?:auto|manual)[ _-]?)?reconnect(?:ion)?)[ _-]+(?:was\s+)?(?:cancell?ed|skipped)\b"
+    r"|(配对|回连)(?:已)?(?:取消|跳过)|(?:取消|跳过)(配对|回连)",
+    re.I,
+)
 FAILED_RESULT = re.compile(
     r"\b(?:failReason|error)\s*[:=]\s*(?!(?:none|null|nil|0|success)\b)[\w-]+|\b(?:success|connected)\s*[:=]\s*(?:false|0)\b",
     re.I,
@@ -125,7 +130,6 @@ TIMING_MARKERS = (
     "发起",
     "rnlink auth",
     "开始rnlink",
-    "ble acl",
     "ble_acl",
     "cberrordomain",
     "find_remote_device",
@@ -154,6 +158,14 @@ def _bond_state(line):
 def _timing_event(line):
     if MANUAL.search(line):
         return None, "cancel", "用户取消或主动断开"
+    skipped = ATTEMPT_SKIPPED.search(line)
+    if skipped:
+        flow = next(value for value in skipped.groups() if value).lower()
+        return (
+            ("pair" if flow.startswith("pair") or flow == "配对" else "reconnect"),
+            "cancel",
+            "流程取消或跳过",
+        )
     if PAIR_ENCRYPTION_FAILURE.search(line):
         return "pair", "失败", "配对加密失败"
     if PAIR_FAIL.search(line):
@@ -187,14 +199,13 @@ def _timing_event(line):
         return "reconnect", "start", "发起回连"
     if RNLINK_AUTH.search(line):
         return None, "rnlink", "RNLink 鉴权完成"
-    acl = ACL_STATE.search(line)
+    # A state summary can say BLE was already connected before this attempt.
+    acl = ACL_STATE.search(line) if "rnlink_on_conn_state" in line.lower() else None
     if (acl and acl[1] == "1") or (
         RECONNECT_BLE.search(line) and _recovers("BLE", line)
     ):
         return None, "ble", "BLE 连通"
-    if (
-        acl and acl[1] == "0" and "rnlink_on_conn_state" in line.lower()
-    ) or BLE_DOWN.search(line):
+    if (acl and acl[1] == "0") or BLE_DOWN.search(line):
         return None, "disconnect", "BLE 断开"
     for code, label, pattern in PHASES:
         if pattern.search(line):
@@ -208,9 +219,14 @@ def _event(time, path, number, text, line):
     return {**note(time, path, number, text, line), "precision": precision}
 
 
-def duration_text(start, end):
+def _duration(start, end):
     precision = min(start["precision"], end["precision"])
     seconds = (end["time"] - start["time"]).total_seconds()
+    return round(seconds, precision), precision
+
+
+def duration_text(start, end):
+    seconds, precision = _duration(start, end)
     return f"{seconds:.{precision}f} 秒"
 
 
@@ -228,42 +244,48 @@ class ConnectionAttempts:
     def __init__(self, path, capacity=MAX_ROWS, windows=()):
         self.path = path
         self.rows = deque(maxlen=capacity)
+        self.single_device_rows = deque(maxlen=capacity)
         self.windows = windows
         self.active = {}
         self.before_start = OrderedDict()
         self.known_devices = set()
         self.total = 0
+        self.single_device_total = 0
 
     def _finish(self, key, status=None, end=None, end_device=None):
         start, steps, partial = self.active.pop(key)
         if end is None and partial is not None:
             _, status, end, end_device = partial
+        if end is None or _duration(start, end)[0] <= 0:
+            return
         if self.windows and not any(
-            start["time"] <= b and (end or start)["time"] >= a for a, b in self.windows
+            start["time"] <= b and end["time"] >= a for a, b in self.windows
         ):
             return
-        if end:
-            steps = [
-                step
-                for step in steps
-                if step[0]["line"] <= end["line"] and step[0]["time"] <= end["time"]
-            ]
-            if steps[-1][0]["line"] != end["line"]:
-                steps.append((end, end_device, "end"))
-        self.rows.append(
-            (
-                {
-                    "kind": key[0],
-                    "device": key[1] or end_device,
-                    "start": start,
-                    "end": end,
-                    "status": status or "缺少结束日志",
-                },
-                steps,
-                key[1] is None or end_device is None,
-            )
-        )
-        self.total += 1
+        both_identified = key[1] is not None and end_device is not None
+        if not both_identified and len(self.known_devices) > 1:
+            return
+        steps = [
+            step
+            for step in steps
+            if step[0]["line"] <= end["line"] and step[0]["time"] <= end["time"]
+        ]
+        if steps[-1][0]["line"] != end["line"]:
+            steps.append((end, end_device, "end"))
+        row = {
+            "kind": key[0],
+            "device": key[1] or end_device,
+            "start": start,
+            "end": end,
+            "status": status,
+        }
+        if both_identified:
+            self.rows.append((row, steps))
+            self.total += 1
+        else:
+            # Provisional results cannot displace identified attempts if a second device appears later.
+            self.single_device_rows.append((row, steps))
+            self.single_device_total += 1
 
     def _matching(self, kind, device):
         kinds = (kind,) if kind else ("pair", "reconnect")
@@ -304,6 +326,8 @@ class ConnectionAttempts:
         device = device or _device(line) or (name[1].lower() if name else None)
         if device and len(self.known_devices) < 2:
             self.known_devices.add(device)
+            if len(self.known_devices) > 1:
+                self.single_device_rows.clear()
         if device is None and len(self.known_devices) > 1:
             return
         event = _event(time, self.path, number, text, line)
@@ -364,8 +388,11 @@ class ConnectionAttempts:
                 if key[0] == "reconnect" and partial and time >= partial[2]["time"]:
                     self._finish(key)
                 continue
-            if role in {"成功", "失败", "失败／超时", "cancel"}:
-                self._finish(key, "已取消" if role == "cancel" else role, event, device)
+            if role == "cancel":
+                self.active.pop(key)
+                continue
+            if role in {"成功", "失败", "失败／超时"}:
+                self._finish(key, role, event, device)
                 continue
             if time < steps[-1][0]["time"] or any(step[2] == role for step in steps):
                 continue
@@ -380,18 +407,22 @@ class ConnectionAttempts:
         for key in tuple(self.active):
             self._finish(key)
         mixed = len(self.known_devices) > 1
-        for row, steps, ambiguous in self.rows:
-            if mixed and ambiguous and (row["end"] or not row["device"]):
-                row.update(
-                    device=None, end=None, status="缺少设备标识", steps=[row["start"]]
+        retained = list(self.rows)
+        total = self.total
+        if not mixed:
+            retained.extend(self.single_device_rows)
+            total += self.single_device_total
+            if len(retained) > self.rows.maxlen:
+                retained.sort(
+                    key=lambda result: (
+                        result[0]["start"]["time"],
+                        result[0]["start"]["line"],
+                    )
                 )
-            else:
-                row["steps"] = [
-                    event
-                    for event, device, role in steps
-                    if not mixed or device or event is row["start"]
-                ]
-        return [row for row, _, _ in self.rows], self.total
+                retained = retained[-self.rows.maxlen :]
+        for row, steps in retained:
+            row["steps"] = [event for event, device, _ in steps if not mixed or device]
+        return [row for row, _ in retained], total
 
 
 def _file_timings(stream, path, parse_time):

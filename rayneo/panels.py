@@ -208,12 +208,12 @@ class ConnectionTimingPanel(QWidget):
             self.model.set_rows(rows)
             self.steps.setEnabled(False)
             if not rows:
-                headline = "未找到带时间戳的配对或回连起点"
+                headline = "未找到可计时的配对或回连记录"
             else:
                 headline = (
-                    f"{total:,} 次尝试"
+                    f"{total:,} 条有效耗时"
                     if len(rows) == total
-                    else f"显示最新 {len(rows):,} 次，共 {total:,} 次"
+                    else f"显示最新 {len(rows):,} 条，共 {total:,} 条有效耗时"
                 )
                 headline += " · 双击起点或终点可跳转"
             if errors:

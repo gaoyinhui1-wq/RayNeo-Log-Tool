@@ -205,7 +205,7 @@ class ConnectionTimingTests(TestCase):
             self.assertEqual(row["start"]["line"], 2)
             self.assertEqual(duration_text(row["start"], row["end"]), "1.291 秒")
 
-    def test_timing_gives_each_attempt_a_real_endpoint_and_keeps_unknowns_open(self):
+    def test_timing_uses_valid_endpoints_and_excludes_unmatched_attempts(self):
         with TemporaryDirectory() as folder:
             source = Path(folder) / "logcat_2026-05-01.log"
             source.write_text(
@@ -225,10 +225,8 @@ class ConnectionTimingTests(TestCase):
             )
             data = read_connection_timings([str(source)], lambda *_: None)
             self.assertFalse(data["errors"])
-            self.assertEqual(data["total"], 5)
-            missing, failed, ble, rnlink, pair = data["rows"]
-            self.assertEqual(missing["status"], "缺少结束日志")
-            self.assertIsNone(missing["end"])
+            self.assertEqual(data["total"], 4)
+            failed, ble, rnlink, pair = data["rows"]
             for row, status, seconds, indexes in (
                 (failed, "失败／超时", 5.5, (8, 9)),
                 (ble, "到 BLE 连通", 1.25, (6, 7)),
@@ -243,7 +241,7 @@ class ConnectionTimingTests(TestCase):
                         (end["time"] - start["time"]).total_seconds(), seconds
                     )
 
-    def test_timing_marks_ambiguous_ends_without_inventing_durations(self):
+    def test_timing_excludes_ambiguous_ends_when_multiple_devices_appear(self):
         with TemporaryDirectory() as folder:
             source = Path(folder) / "connect.log"
             lines = (
@@ -257,9 +255,42 @@ class ConnectionTimingTests(TestCase):
                 lines + "2026-05-01 10:00:02.250 配对成功 deviceId=bb\n",
                 encoding="utf-8",
             )
-            result = read_connection_timings([str(source)], lambda *_: None)["rows"][0]
-            self.assertEqual(result["status"], "缺少设备标识")
-            self.assertIsNone(result["end"])
+            result = read_connection_timings([str(source)], lambda *_: None)
+            self.assertEqual(result["total"], 0)
+            self.assertEqual(result["rows"], [])
+
+    def test_timing_drops_cancelled_skipped_and_zero_but_keeps_short_measurements(self):
+        with TemporaryDirectory() as folder:
+            source = Path(folder) / "connect.log"
+            source.write_text(
+                "2026-11-24 09:44:47.224 auto reconnect start deviceId=aa\n"
+                "2026-11-24 09:44:47.224 user disconnect deviceId=aa\n"
+                "2026-11-24 09:44:50.100 reconnect start deviceId=aa\n"
+                "2026-11-24 09:44:50.240 BLE physical connect success deviceId=aa\n"
+                "2026-11-24 09:44:50.915 auto_reconnect_cancelled deviceId=aa\n"
+                "2026-11-24 09:44:54.100 auto reconnect start deviceId=aa\n"
+                "2026-11-24 09:44:54.101 reconnect skipped: already connected deviceId=aa\n"
+                "2026-11-24 09:45:00.000 pairing start deviceId=aa\n"
+                "2026-11-24 09:45:00.000 pairing success deviceId=aa\n"
+                "2026-11-24 09:45:03.000 pairing start deviceId=aa\n"
+                "2026-11-24 09:45:03.000210 pairing success deviceId=aa\n"
+                "2026-11-24 09:45:05.000 auto reconnect trigger deviceId=aa\n"
+                "2026-11-24 09:45:05.025 ble acl:1 deviceId=aa\n"
+                "2026-11-24 14:14:29.731 auto reconnect start deviceId=aa\n"
+                "2026-11-24 14:14:31.285 auto reconnect timeout deviceId=aa\n"
+                "2026-11-24 14:14:32.241125 auto reconnect trigger deviceId=aa\n"
+                "2026-11-24 14:14:32.248042 rnlink_on_conn_state link_type: BLE_ACL, state 1 deviceId=aa\n",
+                encoding="utf-8",
+            )
+            data = read_connection_timings([str(source)], lambda *_: None)
+            self.assertEqual(data["total"], 2)
+            self.assertEqual(
+                [
+                    (row["status"], duration_text(row["start"], row["end"]))
+                    for row in data["rows"]
+                ],
+                [("到 BLE 连通", "0.006917 秒"), ("失败／超时", "1.554 秒")],
+            )
 
 
 class BluetoothSampleTests(TestCase):
