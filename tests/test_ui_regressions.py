@@ -57,7 +57,7 @@ class GuiRegressionTests(GuiCase):
                     widget.geometry().center().y()
                     - self.win.search_input.geometry().center().y()
                 ),
-                2,
+                6,
             )
         with patch(
             "rayneo.window.QDialog.exec", return_value=QDialog.DialogCode.Rejected

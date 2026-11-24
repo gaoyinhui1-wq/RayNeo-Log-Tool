@@ -122,12 +122,14 @@ DEVICE_SUMMARY_FIELDS = (
 )
 
 
-def format_device_summary(info, show_unknown=False):
+def format_device_summary(info, show_unknown=False, compact=False):
     essential = {"眼镜SN", "App版本", "手机系统版本", "RayneoNet SDK", "眼镜系统版本"}
+    short_labels = {"手机系统版本": "手机", "眼镜系统版本": "眼镜"} if compact else {}
     return " · ".join(
-        f"{label} {info.get(key) or '未知'}"
+        f"{short_labels.get(key, label)} {info.get(key) or '未知'}"
         for key, label in DEVICE_SUMMARY_FIELDS
-        if info.get(key) or (show_unknown and key in essential)
+        if (not compact or key in essential)
+        and (info.get(key) or (show_unknown and key in essential))
     )
 
 

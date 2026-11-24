@@ -270,6 +270,14 @@ class AppWindow(QMainWindow):
         self.btn_find.setObjectName("SearchButton")
         self.btn_search = add_btn("筛选", self.show_filter, "Ctrl+Shift+F")
         self.btn_search.setObjectName("FilterButton")
+        self._toolbar_labels = (
+            (self.btn_decrypt, "解密/解压", "解密"),
+            (self.btn_new_note, "新建笔记", "笔记"),
+            (self.btn_float_search, "悬浮搜索", "浮搜"),
+            (self.btn_float_results, "悬浮结果", "浮窗"),
+        )
+        self._compact_toolbar = None
+        self._update_toolbar_labels()
         scope_row = QHBoxLayout()
         scope_row.setSpacing(5)
         scope_row.addWidget(QLabel("分析范围"))
@@ -602,6 +610,19 @@ class AppWindow(QMainWindow):
 
         return NOTEPAD_STYLE
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "_toolbar_labels"):
+            self._update_toolbar_labels()
+
+    def _update_toolbar_labels(self):
+        compact = self.width() < 700
+        if compact == self._compact_toolbar:
+            return
+        self._compact_toolbar = compact
+        for button, full, short in self._toolbar_labels:
+            button.defaultAction().setText(short if compact else full)
+
     def eventFilter(self, obj, event):
         if (
             obj is getattr(self, "device_bar", None)
@@ -622,17 +643,22 @@ class AppWindow(QMainWindow):
             return True
         return super().eventFilter(obj, event)
 
-    def _set_device_summary(self, text=None):
+    def _set_device_summary(self, text=None, compact=None):
         if text is not None:
             self.device_bar.setToolTip(text)
+            self._compact_device_summary = compact or text
         full = self.device_bar.toolTip()
         if not full:
             return
         font = self.device_bar.fontMetrics()
+        width = max(0, self.device_bar.width() - 18)
+        visible = (
+            full
+            if font.horizontalAdvance(full) <= width
+            else self._compact_device_summary
+        )
         self.device_bar.setText(
-            font.elidedText(
-                full, Qt.TextElideMode.ElideRight, max(0, self.device_bar.width() - 18)
-            )
+            font.elidedText(visible, Qt.TextElideMode.ElideRight, width)
         )
 
     def position_find_bar(self):
@@ -873,7 +899,8 @@ class AppWindow(QMainWindow):
         self._version_pending = False
         self.device_info = data.get("device_info", {})
         self._set_device_summary(
-            format_device_summary(self.device_info, show_unknown=True)
+            format_device_summary(self.device_info, show_unknown=True),
+            format_device_summary(self.device_info, show_unknown=True, compact=True),
         )
         if auto and not data.get("cancelled"):
             self._auto_analyze_after_import()
@@ -955,7 +982,10 @@ class AppWindow(QMainWindow):
         self.search_dock.setFloating(not self.search_dock.isFloating())
         self.search_dock.show()
         self.search_dock.raise_()
-        self.search_dock.resize(900, 100)
+        if self.search_dock.isFloating():
+            self.search_dock.resize(
+                min(840, self.width()), self.search_dock.minimumSizeHint().height()
+            )
         self.search_input.setFocus()
 
     def toggle_results_float(self):
