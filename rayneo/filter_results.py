@@ -7,7 +7,7 @@ from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from .ingestion import read_text_file, text_encoding
+from .ingestion import escaped_binary_preview, text_encoding
 from .matching import LineMatcher
 
 
@@ -56,9 +56,8 @@ def write_filter_results(destination, paths, spec):
             try:
                 encoding = text_encoding(path)
                 if encoding is None:
-                    text = read_text_file(path)
-                    if text is not None:
-                        _save_matches(db, source_id, io.StringIO(text), matcher)
+                    text = escaped_binary_preview(path)
+                    _save_matches(db, source_id, io.StringIO(text), matcher)
                 else:
                     try:
                         errors = "strict" if encoding == "utf-8-sig" else "replace"

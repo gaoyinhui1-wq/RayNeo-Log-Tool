@@ -19,7 +19,9 @@ class GuiTests(GuiCase):
         folder = self.root / "folder"
         folder.mkdir()
         (folder / "events.log").write_text(
-            "2026-01-01 00:00:00 BLE physical connect timeout\n2026-01-01 00:00:01 [INFO] healthy\n"
+            "2026-01-01 00:00:00 sendMsg exchange version time out\n"
+            "2026-01-01 00:00:01 [INFO] healthy\n",
+            encoding="utf-8",
         )
         self.win.start_preview([str(folder)], True)
         self.wait(
@@ -30,11 +32,11 @@ class GuiTests(GuiCase):
             )
         )
         self.assertEqual(len(self.win.file_list_data), 1)
-        self.assertIn("BLE physical connect timeout", self.win.viewer._log)
+        self.assertIn("exchange version time out", self.win.viewer._log)
         self.win.reanalyze()
         self.wait(lambda: self.win.has_analyzed and not self.win._busy())
         self.assertEqual(len(self.win.incidents), 1)
-        self.assertIn("BLE连接流程超时", self.win.txt_analysis.toPlainText())
+        self.assertIn("眼镜版本交换超时", self.win.txt_analysis.toPlainText())
         self.wait(lambda: self.win.file_read_worker is None)
         payload = self.win.prepared_payload
         self.win.reanalyze()

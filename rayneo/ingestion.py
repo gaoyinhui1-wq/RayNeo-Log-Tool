@@ -740,12 +740,47 @@ def text_encoding(path):
     if b"\0" in head:
         even = head[0::2].count(0)
         odd = head[1::2].count(0)
-        if odd >= len(head) // 8 and even <= len(head) // 50:
+        if odd >= max(2, len(head) // 8) and even <= len(head) // 50:
             return "utf-16-le"
-        if even >= len(head) // 8 and odd <= len(head) // 50:
+        if even >= max(2, len(head) // 8) and odd <= len(head) // 50:
             return "utf-16-be"
         return None
+    controls = sum(
+        head.count(bytes((value,)))
+        for value in range(1, 32)
+        if value not in (9, 10, 12, 13, 27)
+    )
+    if controls >= 4 and controls > len(head) // 20:
+        return None
     return "utf-8-sig"
+
+
+def scan_text_file(path, scan):
+    """Call scan with one streaming decoder, restarting on legacy encodings."""
+    encoding = text_encoding(path)
+    if encoding is None:
+        return None
+    errors = "strict" if encoding == "utf-8-sig" else "replace"
+    try:
+        with open(path, encoding=encoding, errors=errors) as stream:
+            return scan(stream)
+    except UnicodeDecodeError:
+        with open(path, encoding="gb18030", errors="replace") as stream:
+            return scan(stream)
+
+
+def escaped_binary_preview(path, limit=32 * 1024):
+    with open(path, "rb") as stream:
+        sample = stream.read(limit + 1)
+    lines = [f"二进制内容 · {Path(path).stat().st_size:,} 字节", ""]
+    for start in range(0, min(limit, len(sample)), 16):
+        row = sample[start : min(limit, start + 16)]
+        escaped = " ".join(f"\\x{value:02x}" for value in row)
+        printable = "".join(chr(value) if 32 <= value <= 126 else "." for value in row)
+        lines.append(f"{start:08X}  {escaped:<79}  |{printable}|")
+    if len(sample) > limit:
+        lines.extend(("", f"已显示前 {limit:,} 字节。"))
+    return "\n".join(lines)
 
 
 def read_text_file(path: str):

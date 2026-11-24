@@ -33,6 +33,7 @@ DEVICE_FIELD_PATTERNS = {
         re.compile(r'\bphoneVersion\s*[:=]\s*["\']?([^,"\'}\]]+)', re.I),
         re.compile(r'\bsystemVersion\s*[:=]\s*["\']?([^,"\'}\]]+)', re.I),
         re.compile(r'\biosVersion\s*[:=]\s*["\']?([^,"\'}\]]+)', re.I),
+        re.compile(r"\bOS Version:\s*(?:iPhone OS|iOS)\s+([0-9]+(?:\.[0-9]+)+)", re.I),
         re.compile(r'\bandroidVersion\s*[:=]\s*["\']?([^,"\'}\]]+)', re.I),
         re.compile(
             r"\b(?:ro\.build\.version\.release|Android OS|Android Version)\s*[:= ]+([0-9][0-9A-Za-z._-]*)",
@@ -368,6 +369,7 @@ def extract_device_info(files_content, reference_time=None):
             "phoneVersion",
             "systemVersion",
             "iosVersion",
+            "OS Version:",
             "androidVersion",
             "harmonyVersion",
             "ohosVersion",

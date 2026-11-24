@@ -172,6 +172,7 @@ class VirtualLogViewer(QAbstractScrollArea):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._log = ""
+        self._line_base = 0
         self._starts = array("I", [0])
         self._line = self._column = 0
         self._anchor = self._cursor = 0
@@ -207,7 +208,9 @@ class VirtualLogViewer(QAbstractScrollArea):
         self._cw = max(5, fm.horizontalAdvance("0"))
 
     def _gutter_width(self):
-        return max(54, max(5, len(str(self.line_count()))) * self._cw + 15)
+        return max(
+            54, max(5, len(str(self._line_base + self.line_count()))) * self._cw + 15
+        )
 
     def line_count(self):
         return len(self._starts)
@@ -223,10 +226,11 @@ class VirtualLogViewer(QAbstractScrollArea):
             return ""
         return self._log[self._starts[line] : self._line_end(line)]
 
-    def set_log_text(self, value, offsets=None):
+    def set_log_text(self, value, offsets=None, line_base=0):
         self._dragging = False
         self._drag_timer.stop()
         self._log = value or ""
+        self._line_base = line_base
         self._starts = offsets if offsets is not None else _line_offsets(self._log)
         self._line = self._column = self._mark_len = 0
         self._anchor = self._cursor = 0
@@ -317,7 +321,9 @@ class VirtualLogViewer(QAbstractScrollArea):
                 ranges.append(span)
             column = start - self._starts[row]
             for a, b in clipped_spans(
-                self._filter_highlights.get(row, ()), column, column + len(displayed)
+                self._filter_highlights.get(self._line_base + row, ()),
+                column,
+                column + len(displayed),
             ):
                 if a == b:
                     continue
@@ -436,7 +442,7 @@ class VirtualLogViewer(QAbstractScrollArea):
                 gutter - 9,
                 self._lh - 2,
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                str(row + 1),
+                str(self._line_base + row + 1),
             )
             start, displayed, layout, text_line = self._layout_for_line(
                 row, highlight=True
@@ -485,7 +491,9 @@ class VirtualLogViewer(QAbstractScrollArea):
             layout.draw(painter, QPointF(text_left, y + 1), selections)
             column = start - self._starts[row]
             for a, b in clipped_spans(
-                self._filter_highlights.get(row, ()), column, column + len(displayed)
+                self._filter_highlights.get(self._line_base + row, ()),
+                column,
+                column + len(displayed),
             ):
                 if a == b:
                     offset = utf16[a] if utf16 is not None else a
@@ -696,7 +704,7 @@ class VirtualLogViewer(QAbstractScrollArea):
         self.viewport().update()
 
     def current_line_col(self):
-        return self._line + 1, self._column + 1
+        return self._line_base + self._line + 1, self._column + 1
 
 
 class PlainFastViewer(QPlainTextEdit):

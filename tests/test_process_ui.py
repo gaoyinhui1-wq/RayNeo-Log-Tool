@@ -49,23 +49,20 @@ class ProcessUiTests(GuiCase):
         path.write_text(text, encoding="utf-8")
         return str(path)
 
-    def test_automatic_analysis_opens_report_and_has_real_icon(self):
+    def test_automatic_analysis_displays_the_primary_cause_and_has_real_icon(self):
         self.win.chk_auto_analyze.setChecked(True)
         path = self.source(
-            "2026-01-01 10:00:00 BLE physical connect timeout\n2026-01-01 10:00:01 BLE physical connect success\n"
+            "2026-01-01 10:00:00 ActivityManager: Process com.android.bluetooth (pid 494) has died\n"
+            "2026-01-01 10:00:01 BLE physical connect timeout\n"
         )
         self.win.start_preview([path], True)
         self.wait(lambda: self.win.has_analyzed and not self.win._busy())
-        self.assertTrue(self.win._report_dialog.isVisible())
-        self.assertEqual(self.win.incidents[0]["status"], "已恢复")
+        self.assertEqual(self.win.results.currentIndex(), 1)
+        self.assertEqual(self.win.incidents[0]["rule_id"], "phone_bt")
         self.assertNotEqual(
             self.win.last_analysis_metadata["process_token"], os.getpid()
         )
-        self.assertTrue(Path(self.win._report_file).is_file())
-        self.assertEqual(
-            self.win._complete_report(),
-            Path(self.win._report_file).read_text(encoding="utf-8"),
-        )
+        self.assertIn("手机蓝牙栈", self.win._complete_report())
         self.assertFalse(self.win.windowIcon().isNull())
 
     def test_search_stays_visible_and_floating_panels_return_without_losing_results(

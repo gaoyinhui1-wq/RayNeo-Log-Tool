@@ -6,7 +6,7 @@ import tempfile
 import time
 import unittest
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import QEvent
+from PyQt6.QtCore import QEvent, QSettings
 from rayneo.window import AppWindow
 
 
@@ -21,7 +21,9 @@ class GuiCase(unittest.TestCase):
         # Qt returns long forward-slash paths on Windows, while tempfile may
         # return an 8.3 path such as RUNNER~1. Use one physical path identity.
         self.root = Path(self.temp.name).resolve()
-        self.win = AppWindow()
+        self.win = AppWindow(
+            QSettings(str(self.root / "settings.ini"), QSettings.Format.IniFormat)
+        )
         self.win.chk_auto_analyze.setChecked(False)
         self.win.show()
         self.app.processEvents()

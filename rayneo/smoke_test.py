@@ -15,6 +15,7 @@ def run_checks():
     # are usable, rather than only proving that the Qt main window can open.
     import lz4.frame
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from PyQt6.QtCore import QSettings
     from PyQt6.QtWidgets import QApplication
     from . import __version__
     from .window import AppWindow
@@ -29,7 +30,12 @@ def run_checks():
     )
     app = QApplication.instance() or QApplication([])
     app.setStyle("Fusion")
-    window = AppWindow()
+    settings_dir = tempfile.TemporaryDirectory(prefix="rayneo_smoke_settings_")
+    window = AppWindow(
+        QSettings(
+            str(Path(settings_dir.name) / "settings.ini"), QSettings.Format.IniFormat
+        )
+    )
     errors = []
     checks = ["LZ4 roundtrip", "AES-GCM roundtrip", "main window imports"]
 
@@ -51,7 +57,8 @@ def run_checks():
         with tempfile.TemporaryDirectory(prefix="rayneo_smoke_") as temp:
             source = Path(temp) / "packaged_demo.log"
             source.write_text(
-                "2026-01-01 10:00:00 [BLE] BLE physical connect timeout\n"
+                "2026-01-01 09:59:59 [App] appVersion=1.2.3, sdkVersion=4.5.6, androidVersion=15\n"
+                "2026-01-01 10:00:00 [System] Bluetooth stack crashed\n"
                 "2026-01-01 10:00:01 [INFO] disconnect then DISCONNECT\n",
                 encoding="utf-8",
             )
@@ -63,14 +70,16 @@ def run_checks():
                 checks.append("application icon and permanent search")
                 window.start_preview([str(source)], True)
                 wait_for(lambda: not window._busy() and window.file_read_worker is None)
-                assert "physical connect timeout" in window.viewer._log
-                checks.append("file import and preview")
+                assert "Bluetooth stack crashed" in window.viewer._log
+                assert window.device_info.get("App版本") == "1.2.3"
+                assert window.device_info.get("RayneoNet SDK") == "v4.5.6"
+                checks.append("file import, preview and device versions")
                 window.reanalyze()
                 wait_for(lambda: not window._busy() and window.file_read_worker is None)
                 assert window.has_analyzed and window.incidents
-                assert window._report_dialog.isVisible()
+                assert window.incidents[0]["rule_id"] == "phone_bt"
                 assert window.last_analysis_metadata["process_token"] != os.getpid()
-                checks.append("background analysis and report")
+                checks.append("background diagnosis and concise report")
                 window.search_input.setText("disconnect")
                 window.filter_all()
                 wait_for(
@@ -94,6 +103,7 @@ def run_checks():
         for worker in (
             window.worker,
             window.preview_worker,
+            window.version_worker,
             window.file_read_worker,
             window.search_worker,
             window.find_worker,
@@ -104,6 +114,7 @@ def run_checks():
                 worker.wait(5000)
         window.close()
         app.processEvents()
+        settings_dir.cleanup()
     return {"status": "passed", "version": __version__, "checks": checks}
 
 

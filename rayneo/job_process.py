@@ -237,7 +237,9 @@ class SearchProcess(QThread):
 class FindProcess(QThread):
     completed = pyqtSignal(object)
 
-    def __init__(self, path, query, offset, regex, case_sensitive):
+    def __init__(
+        self, path, query, offset, regex, case_sensitive, paged=False, escaped=False
+    ):
         super().__init__()
         self.session = JobSession()
         self._generation = self.session.generation
@@ -249,6 +251,8 @@ class FindProcess(QThread):
             "offset": offset,
             "regex": regex,
             "case_sensitive": case_sensitive,
+            "paged": paged,
+            "escaped": escaped,
         }
 
     def requestInterruption(self):
@@ -301,6 +305,8 @@ def serve(directory):
         threading.Thread(target=watch_parent, daemon=True).start()
     prepared = None
     fingerprint = None
+    diagnosis_signature = None
+    diagnosis_cache = {}
 
     def send(kind, **data):
         print(
@@ -325,7 +331,89 @@ def serve(directory):
         try:
             request = json.loads(line, object_hook=decode)
             operation = request.pop("operation")
-            if operation == "analysis":
+            if operation == "versions":
+                from .log_scan import read_versions
+
+                send("result", data={"device_info": read_versions(request["paths"])})
+            elif operation == "diagnose":
+                from . import rules
+                from .diagnosis import analysis_windows, diagnose, diagnosis_report
+                from .text import file_revision
+
+                started = time.monotonic()
+                rules.RULES_PATH = Path(request["rules_path"])
+                try:
+                    rules.reload_external_rules()
+                except Exception as exc:
+                    send("result", data={"error": f"异常规则文件错误：{exc}"})
+                    continue
+                paths = list(dict.fromkeys(request["paths"]))
+                stamps = []
+                for path in paths:
+                    try:
+                        stamps.append((path, file_revision(path)))
+                    except OSError:
+                        stamps.append((path, None))
+                signature = tuple(stamps)
+                changed = (
+                    diagnosis_signature is not None and diagnosis_signature != signature
+                )
+                if diagnosis_signature != signature:
+                    diagnosis_signature = signature
+                    diagnosis_cache.clear()
+                windows = analysis_windows(
+                    request["issue_times"],
+                    request["window_minutes"],
+                    request["analysis_mode"],
+                    request["range_start"],
+                    request["range_end"],
+                )
+                key = windows, rules.RULES_SIGNATURE
+                cached = diagnosis_cache.get(key)
+                if cached is None:
+                    last_update = 0.0
+
+                    def progress(index, count, name):
+                        nonlocal last_update
+                        now = time.monotonic()
+                        if now - last_update >= 0.15:
+                            send(
+                                "progress",
+                                value=10 + int(85 * (index - 1) / count),
+                                message=f"分析 {name}（{index}/{count}）",
+                            )
+                            last_update = now
+
+                    cached = diagnose(
+                        paths,
+                        windows,
+                        rules.DISABLED_RULE_NAMES,
+                        progress,
+                        rules.EXTERNAL_RULES,
+                    )
+                    if len(diagnosis_cache) >= 8:
+                        diagnosis_cache.pop(next(iter(diagnosis_cache)))
+                    diagnosis_cache[key] = cached
+                    reused = False
+                else:
+                    reused = True
+                incidents, errors = cached
+                devices = request.get("device_info") or {}
+                send(
+                    "result",
+                    data={
+                        "source_changed": changed,
+                        "file_paths": paths,
+                        "report_text": diagnosis_report(incidents, devices, errors),
+                        "incidents": incidents,
+                        "device_info": devices,
+                        "analysis_errors": errors,
+                        "analysis_seconds": time.monotonic() - started,
+                        "reused_cache": reused,
+                        "prepared_payload": {"process_token": os.getpid()},
+                    },
+                )
+            elif operation == "analysis":
                 from . import rules
                 from .analysis_worker import WorkerThread
                 from .ingestion import collect_input_files
@@ -419,25 +507,59 @@ def serve(directory):
             elif operation == "find":
                 import re
 
-                from .ingestion import read_text_file
+                from .ingestion import (
+                    escaped_binary_preview,
+                    read_text_file,
+                    scan_text_file,
+                )
 
-                content = read_text_file(request["path"]) or ""
                 pattern = re.compile(
                     request["query"]
                     if request["regex"]
                     else re.escape(request["query"]),
                     0 if request["case_sensitive"] else re.I,
                 )
-                hit = pattern.search(content, request["offset"]) or pattern.search(
-                    content
-                )
+                if request.get("paged"):
+
+                    def find_paged(stream):
+                        fallback = None
+                        start = 0
+                        for row, line in enumerate(stream):
+                            match = pattern.search(line)
+                            if match and fallback is None:
+                                fallback = (
+                                    start + match.start(),
+                                    match.end() - match.start(),
+                                    row,
+                                    match.start(),
+                                )
+                            offset = request["offset"] - start
+                            if offset <= len(line):
+                                hit = pattern.search(line, max(0, offset))
+                                if hit:
+                                    return (
+                                        start + hit.start(),
+                                        hit.end() - hit.start(),
+                                        row,
+                                        hit.start(),
+                                    )
+                            start += len(line)
+                        return fallback
+
+                    match = scan_text_file(request["path"], find_paged) or (-1, 0)
+                else:
+                    content = (
+                        escaped_binary_preview(request["path"])
+                        if request.get("escaped")
+                        else read_text_file(request["path"]) or ""
+                    )
+                    hit = pattern.search(content, request["offset"]) or pattern.search(
+                        content
+                    )
+                    match = (hit.start(), hit.end() - hit.start()) if hit else (-1, 0)
                 send(
                     "result",
-                    data={
-                        "match": (hit.start(), hit.end() - hit.start())
-                        if hit
-                        else (-1, 0)
-                    },
+                    data={"match": match},
                 )
             else:
                 raise ValueError("未知后台任务")

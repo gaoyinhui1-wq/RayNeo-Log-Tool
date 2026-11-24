@@ -37,6 +37,7 @@ QComboBox QAbstractItemView { background:white; selection-background-color:#dded
 QSplitter::handle { background:#e7e7e7; }
 QSplitter::handle:hover { background:#9cc8ef; }
 #SearchBar { background:#fafafa; border:1px solid #c7c7c7; border-radius:4px; }
+#DeviceSummary { background:#edf3f8; color:#29435a; padding:5px 9px; border-bottom:1px solid #dae4ed; }
 #BottomStrip, QStatusBar { background:#f3f3f3; border-top:1px solid #e3e3e3; }
 #StatusHint { color:#555; }
 QProgressBar { background:#e7e7e7; border:0; }

@@ -515,6 +515,7 @@ def _load_logic_rules(path=None):
             {
                 "问题名称": problem_name,
                 "问题原因": reason,
+                "重点": item.get("重点") is True,
                 "判定逻辑": logic,
                 "判定逻辑原文": logic_text,
                 "异常日志": trigger_terms,

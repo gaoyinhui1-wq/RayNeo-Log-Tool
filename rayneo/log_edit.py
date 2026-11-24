@@ -169,10 +169,22 @@ class LogSaveThread(QThread):
 
 
 class LogEditDialog(QDialog):
-    def __init__(self, path, text, offsets, revision, position, temporary_dirs, parent):
+    def __init__(
+        self,
+        path,
+        text,
+        offsets,
+        revision,
+        position,
+        temporary_dirs,
+        parent,
+        file_offset=0,
+        line_base=0,
+    ):
         super().__init__(parent)
         self.path = Path(path)
         self.text, self.offsets, self.revision = text, offsets, revision
+        self.file_offset, self.line_base = file_offset, line_base
         self.temporary_dirs = tuple(Path(folder) for folder in temporary_dirs)
         self.copy_only = any(root in self.path.parents for root in self.temporary_dirs)
         self.destination = None
@@ -218,8 +230,10 @@ class LogEditDialog(QDialog):
     def _load(self, start, position=None):
         self.start = start
         self.original = self.text[start : start + EDIT_PAGE_SIZE]
-        first = bisect_right(self.offsets, start)
-        last = bisect_right(self.offsets, start + max(0, len(self.original) - 1))
+        first = self.line_base + bisect_right(self.offsets, start)
+        last = self.line_base + bisect_right(
+            self.offsets, start + max(0, len(self.original) - 1)
+        )
         self.location.setText(
             f"第 {first:,}–{last:,} 行"
             + (" · 解包日志须另存为文本文件" if self.copy_only else "")
@@ -273,7 +287,14 @@ class LogEditDialog(QDialog):
         self.parent()._cancel_search_for_log_save()
         self.destination = target
         self.worker = LogSaveThread(
-            (self.path, target, self.revision, self.start + start, expected, edited),
+            (
+                self.path,
+                target,
+                self.revision,
+                self.file_offset + self.start + start,
+                expected,
+                edited,
+            ),
             self,
         )
         self.worker.finished.connect(self._saved)

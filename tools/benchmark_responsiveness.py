@@ -78,7 +78,6 @@ try:
             )
         )
         assert len(w.file_list_data) == 5, w.file_list_data
-        w._report_dialog.hide()
         results.append(
             phase(
                 "repeat_analysis",
@@ -86,7 +85,6 @@ try:
                 lambda: not w._busy() and w.file_read_worker is None,
             )
         )
-        w._report_dialog.hide()
         w.search_scope.setCurrentIndex(1)
         w.search_input.setText("delivered")
         results.append(
