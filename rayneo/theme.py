@@ -42,7 +42,9 @@ QSplitter::handle:hover { background:#9cc8ef; }
  padding:2px 5px; min-height:19px; }
 #SearchBar QComboBox, #SearchBar QLineEdit { padding:2px 4px; }
 #SearchBar QToolButton:checked { background:#dceafd; border-color:#83a9db; }
-#DeviceSummary { background:#edf3f8; color:#29435a; padding:2px 8px; border-bottom:1px solid #dae4ed; }
+#DeviceInfoPanel { background:#fff; border:1px solid #e3e9e5; border-radius:4px; }
+#DeviceInfoHeading { background:#eaf5ed; color:#1a7f37; font-weight:600; padding:2px 5px; min-height:18px; }
+QPlainTextEdit#DeviceInfoFields { background:#fff; border:0; }
 #BottomStrip, QStatusBar { background:#f3f3f3; border-top:1px solid #e3e3e3; }
 #StatusHint { color:#555; }
 QProgressBar { background:#e7e7e7; border:0; }

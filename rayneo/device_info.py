@@ -112,25 +112,25 @@ DEVICE_FIELD_PATTERNS = {
 }
 
 DEVICE_SUMMARY_FIELDS = (
-    ("眼镜SN", "眼镜 SN"),
-    ("眼镜名称", "眼镜"),
-    ("App版本", "App"),
-    ("手机系统版本", "手机系统"),
-    ("RayneoNet SDK", "SDK"),
-    ("眼镜系统版本", "眼镜系统"),
-    ("手机型号", "手机"),
+    ("手机平台", "手机平台"),
+    ("手机型号", "手机型号"),
+    ("手机系统版本", "手机系统版本"),
+    ("App版本", "App版本"),
+    ("RayneoNet SDK", "RayNeoNet SDK"),
+    ("眼镜名称", "眼镜名称"),
+    ("眼镜SN", "眼镜SN"),
+    ("眼镜系统版本", "眼镜系统版本"),
+    ("眼镜日志解析", "眼镜日志解析"),
 )
 
 
-def format_device_summary(info, show_unknown=False, compact=False):
+def device_summary_lines(info, show_unknown=False):
     essential = {"眼镜SN", "App版本", "手机系统版本", "RayneoNet SDK", "眼镜系统版本"}
-    short_labels = {"手机系统版本": "手机", "眼镜系统版本": "眼镜"} if compact else {}
-    return " · ".join(
-        f"{short_labels.get(key, label)} {info.get(key) or '未知'}"
+    return [
+        f"{label}：{info.get(key) or '未知'}"
         for key, label in DEVICE_SUMMARY_FIELDS
-        if (not compact or key in essential)
-        and (info.get(key) or (show_unknown and key in essential))
-    )
+        if info.get(key) or (show_unknown and key in essential)
+    ]
 
 
 def _clean_info_value(value: str) -> str:

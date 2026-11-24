@@ -41,23 +41,22 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox,
     QToolBar,
     QToolButton,
-    QSizePolicy,
 )
 from PyQt6.QtCore import QAbstractTableModel, QModelIndex
 from PyQt6.QtGui import QBrush
 from . import rules as rule_config
 from .dialogs import InputDialog
 from .background import DecryptExportThread, FileReadThread, PreviewOpenThread
-from .device_info import format_device_summary
 from .rules import open_rules_file
 from .search import MatchResultModel
 from .matching import SearchSpec
 from .filter_results import DiskMatchRows
 from .filter_history import FilterHistoryButton
 from .notes import NotesDock
+from .panels import DeviceInfoPanel, SearchDock
 from .large_log import PAGE_LINES
 from .result_delegate import MatchHighlightDelegate
-from .viewer import VirtualLogViewer
+from .viewer import VirtualLogViewer, VSCodeReportHighlighter
 
 
 LOG_VIEW_CACHE_BYTES = 128 * 1024 * 1024
@@ -314,18 +313,6 @@ class AppWindow(QMainWindow):
         self.lbl_status.setMaximumWidth(180)
         self.statusBar().addPermanentWidget(self.lbl_status)
         layout.addWidget(tools)
-        self.device_bar = QLabel()
-        self.device_bar.setObjectName("DeviceSummary")
-        self.device_bar.setTextFormat(Qt.TextFormat.PlainText)
-        self.device_bar.setWordWrap(False)
-        self.device_bar.setSizePolicy(
-            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed
-        )
-        self.device_bar.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-        )
-        self.device_bar.hide()
-        layout.addWidget(self.device_bar)
 
         self.time_bar = QFrame()
         self.time_bar.setObjectName("SubStrip")
@@ -390,6 +377,8 @@ class AppWindow(QMainWindow):
         fp = QVBoxLayout(self.file_panel)
         fp.setContentsMargins(4, 4, 4, 4)
         fp.setSpacing(3)
+        self.device_panel = DeviceInfoPanel(self.file_panel)
+        fp.addWidget(self.device_panel)
         self.lbl_files = QLabel("文件")
         fp.addWidget(self.lbl_files)
         self.list_files = QListWidget()
@@ -416,8 +405,6 @@ class AppWindow(QMainWindow):
         el.setSpacing(0)
         self.viewer = VirtualLogViewer(container)
         el.addWidget(self.viewer, 1)
-        from .panels import SearchDock
-
         self.search_dock = SearchDock(self)
         self.search_box = QFrame(self.search_dock)
         self.search_dock.setWidget(self.search_box)
@@ -540,7 +527,7 @@ class AppWindow(QMainWindow):
         self.txt_analysis.setUndoRedoEnabled(False)
         self.txt_analysis.setFont(QFont("Segoe UI", 10))
         self.txt_analysis.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
-        self.report_highlighter = None  # 首次分析完成时才创建高亮器，减少首次启动开销
+        self.report_highlighter = VSCodeReportHighlighter(self.txt_analysis.document())
         self.results.addTab(self.txt_analysis, "分析结果")
         self.tbl_incidents = QTableView()
         self.tbl_incidents.setAlternatingRowColors(True)
@@ -610,11 +597,10 @@ class AppWindow(QMainWindow):
         self.hsplit.addWidget(right)
         self.hsplit.setStretchFactor(0, 0)
         self.hsplit.setStretchFactor(1, 1)
-        self.hsplit.setSizes([162, 850])
+        self.hsplit.setSizes([252, 850])
         layout.addWidget(self.hsplit, 1)
         self.statusBar().setSizeGripEnabled(True)
         self.search_input.textChanged.connect(self._search_text_changed)
-        self.device_bar.installEventFilter(self)
 
     def styles(self):
         from .theme import NOTEPAD_STYLE
@@ -637,11 +623,6 @@ class AppWindow(QMainWindow):
             button.setMaximumWidth(52 if compact else 16_777_215)
 
     def eventFilter(self, obj, event):
-        if (
-            obj is getattr(self, "device_bar", None)
-            and event.type() == QEvent.Type.Resize
-        ):
-            self._set_device_summary()
         if obj is self.viewer and event.type() in (
             QEvent.Type.Resize,
             QEvent.Type.Show,
@@ -655,24 +636,6 @@ class AppWindow(QMainWindow):
             self.viewer.setFocus()
             return True
         return super().eventFilter(obj, event)
-
-    def _set_device_summary(self, text=None, compact=None):
-        if text is not None:
-            self.device_bar.setToolTip(text)
-            self._compact_device_summary = compact or text
-        full = self.device_bar.toolTip()
-        if not full:
-            return
-        font = self.device_bar.fontMetrics()
-        width = max(0, self.device_bar.width() - 18)
-        visible = (
-            full
-            if font.horizontalAdvance(full) <= width
-            else self._compact_device_summary
-        )
-        self.device_bar.setText(
-            font.elidedText(visible, Qt.TextElideMode.ElideRight, width)
-        )
 
     def position_find_bar(self):
         if not hasattr(self, "search_box"):
@@ -888,13 +851,12 @@ class AppWindow(QMainWindow):
         if files:
             self._start_version_scan()
         else:
-            self.device_bar.hide()
+            self.device_panel.hide()
 
     def _start_version_scan(self, auto=True):
         from .job_process import AnalysisProcess
 
-        self._set_device_summary("正在读取眼镜 SN 和版本…")
-        self.device_bar.show()
+        self.device_panel.set_text("正在读取设备信息…")
         self._version_pending = True
         generation = self._input_generation
         self.version_worker = AnalysisProcess(
@@ -911,10 +873,7 @@ class AppWindow(QMainWindow):
             return
         self._version_pending = False
         self.device_info = data.get("device_info", {})
-        self._set_device_summary(
-            format_device_summary(self.device_info, show_unknown=True),
-            format_device_summary(self.device_info, show_unknown=True, compact=True),
-        )
+        self.device_panel.set_info(self.device_info)
         if auto and not data.get("cancelled"):
             self._auto_analyze_after_import()
 
@@ -1038,8 +997,12 @@ class AppWindow(QMainWindow):
             self._report_dialog.resize(960, 620)
             box = QVBoxLayout(self._report_dialog)
             self._report_view = QPlainTextEdit()
+            self._report_view.setObjectName("ReportView")
             self._report_view.setReadOnly(True)
             self._report_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+            self._floating_report_highlighter = VSCodeReportHighlighter(
+                self._report_view.document()
+            )
             box.addWidget(self._report_view)
             button = QPushButton("导出完整报告")
             button.clicked.connect(self.export_analysis)

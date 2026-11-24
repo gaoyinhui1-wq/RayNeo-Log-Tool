@@ -4,7 +4,7 @@ import re
 from collections import OrderedDict
 from datetime import timedelta
 from pathlib import Path
-from .device_info import format_device_summary
+from .device_info import device_summary_lines
 
 
 LINK_MARKERS = (
@@ -201,7 +201,8 @@ def diagnosis_report(items, devices, errors=(), link_trace=None):
     )
     dates = {group[0]["time"].date() for group in groups if group[0]["time"]}
     stamp = "%m-%d %H:%M:%S" if len(dates) > 1 else "%H:%M:%S"
-    blocks = []
+    details = device_summary_lines(devices)
+    blocks = ["\n".join(("设备信息", *details))] if details else []
     for group in groups:
         lead = group[0]
         prefix = lead["time"].strftime(stamp) + " " if lead["time"] else ""
@@ -220,9 +221,6 @@ def diagnosis_report(items, devices, errors=(), link_trace=None):
         blocks.append("这段卡在 RNLink 建链，原因待确认。")
     elif not groups:
         blocks.append("这段日志里没有看到能确认原因的记录。")
-    versions = format_device_summary(devices)
-    if versions:
-        blocks.append(versions)
     if errors:
         blocks.append(f"{len(errors)} 个文件读取失败。")
     return "\n\n".join(blocks)

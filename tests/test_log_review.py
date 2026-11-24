@@ -7,6 +7,7 @@ from unittest import TestCase
 from unittest.mock import patch
 
 from PyQt6.QtCore import QSettings, QTimer
+from PyQt6.QtGui import QTextCursor
 from PyQt6.QtWidgets import QApplication
 
 from gui_support import GuiCase
@@ -176,10 +177,11 @@ class ReviewUiTests(GuiCase):
         self.assertEqual(target.read_text(encoding="utf-8"), report)
 
     def test_versions_are_visible_before_any_analysis_and_binary_is_escaped(self):
-        text_path = self.root / "a.log"
+        text_path = self.root / "a_native_ios.log"
         text_path.write_text(
             "2026-04-01 12:00:00 appVersion=1.2.3, sdkVersion=v4.5.6, iosVersion=18.4\n"
-            "2026-04-02 12:00:00 appVersion=1.2.4, mfiSerial=RAYSN123456\n"
+            "2026-04-02 12:00:00 phoneModel=iPhone16,1, appVersion=1.2.4, mfiSerial=RAYSN123456\n"
+            "2026-04-02 12:00:01 deviceName=RayNeo iO-TEST1, connected=true\n"
             + "2026-04-02 12:01:00 RayneoNet-v4.5.6 heartbeat\n"
             * 450,
             encoding="utf-8",
@@ -191,9 +193,34 @@ class ReviewUiTests(GuiCase):
         self.load(text_path, binary, metadata)
         self.assertFalse(self.win.has_analyzed)
         self.assertEqual(self.win.device_info["App版本"], "1.2.4")
-        self.assertIn("SDK v4.5.6", self.win.device_bar.toolTip())
-        self.assertIn("手机系统 18.4", self.win.device_bar.toolTip())
-        self.assertIn("眼镜 SN RAYSN123456", self.win.device_bar.text())
+        panel = self.win.device_panel
+        expected_details = "\n".join(
+            (
+                "手机平台：iOS",
+                "手机型号：iPhone 15 Pro (iPhone16,1)",
+                "手机系统版本：18.4",
+                "App版本：1.2.4",
+                "RayNeoNet SDK：v4.5.6",
+                "眼镜名称：RayNeo iO-TEST1",
+                "眼镜SN：RAYSN123456",
+                "眼镜系统版本：Strix OS 1.0.6.14",
+                "眼镜日志解析：已解析（1 个眼镜侧文件）",
+            )
+        )
+        self.assertIs(panel.parent(), self.win.file_panel)
+        self.assertEqual(panel.details.toPlainText(), expected_details)
+        self.assertEqual(panel.details.toolTip(), expected_details)
+        last_line = QTextCursor(panel.details.document().lastBlock())
+        self.assertTrue(
+            panel.details.viewport()
+            .rect()
+            .contains(panel.details.cursorRect(last_line))
+        )
+        panel.heading.click()
+        self.assertFalse(panel.details.isVisible())
+        self.assertTrue(self.win.list_files.isVisible())
+        panel.heading.click()
+        self.assertTrue(panel.details.isVisible())
         self.assertEqual(self.win.device_info["眼镜系统版本"], "Strix OS 1.0.6.14")
         self.assertTrue(self.win.list_files.item(1).isHidden())
         self.assertTrue(self.win.list_files.item(2).isHidden())
@@ -211,8 +238,11 @@ class ReviewUiTests(GuiCase):
         )
         self.win.reanalyze()
         self.wait(lambda: not self.win._busy() and self.win.has_analyzed)
-        self.assertIn("眼镜 SN RAYSN123456", self.win.txt_analysis.toPlainText())
-        self.assertIn("眼镜系统 Strix OS 1.0.6.14", self.win.txt_analysis.toPlainText())
+        self.assertTrue(
+            self.win.txt_analysis.toPlainText().startswith(
+                f"设备信息\n{expected_details}\n\n"
+            )
+        )
 
     def test_detailed_locations_are_separate_from_the_compact_report(self):
         source = self.root / "events.log"
