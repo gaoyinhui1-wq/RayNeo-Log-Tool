@@ -35,6 +35,7 @@ class GuiRegressionTests(GuiCase):
         self.win.resize(570, 500)
         self.app.processEvents()
         self.assertTrue(self.win.btn_decrypt.isVisible())
+        self.assertTrue(self.win.btn_new_note.isVisible())
         with patch(
             "rayneo.window.QDialog.exec", return_value=QDialog.DialogCode.Rejected
         ) as execute:

@@ -236,9 +236,6 @@ class AppWindow(QMainWindow):
             "选择本地文件、压缩包或整个文件夹（Ctrl+O）",
         )
         self.btn_open.setObjectName("OpenButton")
-        self.btn_new_note = add_btn(
-            "新建笔记", self.notes.new_note, "Ctrl+N 新建分析笔记"
-        )
         self.btn_analyze = add_btn("▶ 开始分析", self.reanalyze, "F5 启动异常分析")
         self.btn_analyze.setObjectName("AnalyzeButton")
         self.btn_cancel = add_btn("取消任务", self.cancel_tasks)
@@ -255,6 +252,9 @@ class AppWindow(QMainWindow):
         actions_row.setObjectName("ViewToolbar")
         actions_row.setMovable(False)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, actions_row)
+        self.btn_new_note = add_btn(
+            "新建笔记", self.notes.new_note, "Ctrl+N 新建分析笔记"
+        )
         self.btn_report = add_btn("查看报告", self.show_report)
         self.btn_export = add_btn("导出报告", self.export_analysis)
         self.btn_float_search = add_btn("悬浮搜索", self.toggle_search_float)
