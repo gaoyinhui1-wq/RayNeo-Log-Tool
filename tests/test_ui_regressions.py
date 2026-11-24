@@ -45,7 +45,10 @@ class GuiRegressionTests(GuiCase):
             self.win.btn_search,
         ):
             self.assertIs(button.parent(), toolbar)
-            self.assertTrue(button.isVisible())
+            self.assertTrue(
+                button.isVisible(),
+                f"{button.text()} is in toolbar overflow at {self.win.width()} px",
+            )
         for widget in (
             self.win.search_scope,
             self.win.keyword_mode,

@@ -270,6 +270,17 @@ class AppWindow(QMainWindow):
         self.btn_find.setObjectName("SearchButton")
         self.btn_search = add_btn("筛选", self.show_filter, "Ctrl+Shift+F")
         self.btn_search.setObjectName("FilterButton")
+        self._toolbar_buttons = (
+            self.btn_open,
+            self.btn_analyze,
+            self.btn_cancel,
+            self.btn_decrypt,
+            self.btn_new_note,
+            self.btn_float_search,
+            self.btn_float_results,
+            self.btn_find,
+            self.btn_search,
+        )
         self._toolbar_labels = (
             (self.btn_decrypt, "解密/解压", "解密"),
             (self.btn_new_note, "新建笔记", "笔记"),
@@ -616,12 +627,14 @@ class AppWindow(QMainWindow):
             self._update_toolbar_labels()
 
     def _update_toolbar_labels(self):
-        compact = self.width() < 700
+        compact = self.width() < 780
         if compact == self._compact_toolbar:
             return
         self._compact_toolbar = compact
         for button, full, short in self._toolbar_labels:
             button.defaultAction().setText(short if compact else full)
+        for button in self._toolbar_buttons:
+            button.setMaximumWidth(52 if compact else 16_777_215)
 
     def eventFilter(self, obj, event):
         if (
