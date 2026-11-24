@@ -10,7 +10,7 @@ from .ingestion import (
     prepare_log_inputs,
     read_text_file,
 )
-from .text import _line_offsets
+from .text import _line_offsets, file_revision
 
 
 class PreviewOpenThread(QThread):
@@ -53,15 +53,21 @@ class FileReadThread(QThread):
 
     def run(self):
         try:
+            revision = file_revision(self.path)
             text = (
                 self.cached_text
                 if self.cached_text is not None
                 else read_text_file(self.path)
             )
-            self.completed.emit(
-                self.path,
-                (text, _line_offsets(text)) if isinstance(text, str) else None,
-            )
+            payload = None
+            if isinstance(text, str):
+                offsets = _line_offsets(text)
+                payload = (
+                    text,
+                    offsets,
+                    revision if revision == file_revision(self.path) else None,
+                )
+            self.completed.emit(self.path, payload)
         except Exception:
             self.completed.emit(self.path, None)
 

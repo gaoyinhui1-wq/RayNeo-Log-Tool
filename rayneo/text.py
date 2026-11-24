@@ -1,5 +1,11 @@
 # -*- coding: utf-8 -*-
 from array import array
+from os import stat
+
+
+def file_revision(path):
+    info = stat(path)
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
 def _line_offsets(text):

@@ -731,29 +731,34 @@ def _extract_glasses_binary_metadata(path: str):
         return None
 
 
+def text_encoding(path):
+    """Return the first decoder to try, or None for a binary log."""
+    with open(path, "rb") as stream:
+        head = stream.read(8192)
+    if head.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return "utf-16"
+    if b"\0" in head:
+        even = head[0::2].count(0)
+        odd = head[1::2].count(0)
+        if odd >= len(head) // 8 and even <= len(head) // 50:
+            return "utf-16-le"
+        if even >= len(head) // 8 and odd <= len(head) // 50:
+            return "utf-16-be"
+        return None
+    return "utf-8-sig"
+
+
 def read_text_file(path: str):
     """同时识别 UTF-8/UTF-16/GB18030；不要把 UTF-16 的 NUL 误当固件二进制。"""
     try:
-        with open(path, "rb") as f:
-            head = f.read(8192)
-        if not head:
-            return ""
-        if head.startswith((b"\xff\xfe", b"\xfe\xff")):
-            return Path(path).read_text(encoding="utf-16", errors="replace")
-        if b"\0" in head:
-            even = head[0::2].count(0)
-            odd = head[1::2].count(0)
-            if odd >= len(head) // 8 and even <= len(head) // 50:
-                return Path(path).read_text(encoding="utf-16-le", errors="replace")
-            if even >= len(head) // 8 and odd <= len(head) // 50:
-                return Path(path).read_text(encoding="utf-16-be", errors="replace")
+        encoding = text_encoding(path)
+        if encoding is None:
             return _extract_glasses_binary_metadata(path)
-        # UTF-8 first; GB18030 fallback if original bytes are not UTF-8.
+        if encoding != "utf-8-sig":
+            return Path(path).read_text(encoding=encoding, errors="replace")
         try:
-            with open(path, "r", encoding="utf-8-sig", errors="strict") as f:
-                return f.read()
+            return Path(path).read_text(encoding=encoding)
         except UnicodeDecodeError:
-            with open(path, "r", encoding="gb18030", errors="replace") as f:
-                return f.read()
+            return Path(path).read_text(encoding="gb18030", errors="replace")
     except (OSError, UnicodeError):
         return None

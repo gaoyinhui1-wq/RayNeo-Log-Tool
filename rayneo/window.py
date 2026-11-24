@@ -31,6 +31,7 @@ from PyQt6.QtWidgets import (
     QTabWidget,
     QCheckBox,
     QTabBar,
+    QHeaderView,
 )
 from PyQt6.QtCore import Qt, QDate, QTime, QDateTime, QEvent, QTimer
 from PyQt6.QtGui import QFont, QColor, QAction
@@ -43,8 +44,12 @@ from .background import DecryptExportThread, FileReadThread, PreviewOpenThread
 from .rules import open_rules_file
 from .search import MatchResultModel
 from .matching import SearchSpec
+from .filter_results import DiskMatchRows
 from .result_delegate import MatchHighlightDelegate
 from .viewer import VirtualLogViewer
+
+
+LOG_VIEW_CACHE_BYTES = 128 * 1024 * 1024
 
 
 class AppWindow(QMainWindow):
@@ -90,6 +95,7 @@ class AppWindow(QMainWindow):
         self.setAcceptDrops(True)
         self.raw_data = {}
         self.file_list_data = []
+        self._file_incident_counts = {}
         self.incidents = []
         self.current_file = None
         self.last_open_paths = None
@@ -113,10 +119,12 @@ class AppWindow(QMainWindow):
         self._pending_selected_path = None
         self._pending_goto = None
         self._line_index_cache = OrderedDict()
+        self._file_revisions = {}
         self._tab_paths = []
         self.find_key = None
         self.find_offset = 0
         self._search_generation = 0
+        self._search_for_find = False
         self._filter_highlights_by_file = {}
         self._closing = False
         self._files_are_prepared = False
@@ -150,6 +158,8 @@ class AppWindow(QMainWindow):
         self.action(m_file, "打开日志…", "Ctrl+O", self.choose_open_source)
         self.action(m_file, "打开文件 / 压缩包...", None, self.open_file_dialog)
         self.action(m_file, "打开文件夹...", "Ctrl+Shift+O", self.open_folder_dialog)
+        self.action_edit = self.action(m_file, "编辑当前日志…", "F2", self.edit_log)
+        self.action_edit.setEnabled(False)
         self.action(m_file, "导出分析报告...", "Ctrl+E", self.export_analysis)
         m_file.addSeparator()
         self.action(m_file, "退出", "Ctrl+Q", self.close)
@@ -247,7 +257,6 @@ class AppWindow(QMainWindow):
         self.chk_auto_analyze.setChecked(True)
         scope_row.addWidget(self.chk_auto_analyze)
         self.chk_float_results = QCheckBox("筛选结果自动悬浮")
-        self.chk_float_results.setChecked(True)
         scope_row.addWidget(self.chk_float_results)
         scope_row.addStretch(1)
         tool_col.addLayout(scope_row)
@@ -353,37 +362,53 @@ class AppWindow(QMainWindow):
         self.search_dock.setWidget(self.search_box)
         self.addDockWidget(Qt.DockWidgetArea.TopDockWidgetArea, self.search_dock)
         self.search_box.setObjectName("SearchBar")
-        sl = QHBoxLayout(self.search_box)
+        sl = QVBoxLayout(self.search_box)
         sl.setContentsMargins(6, 4, 6, 4)
         sl.setSpacing(4)
+        query_row = QHBoxLayout()
+        query_row.setSpacing(4)
+        options_row = QHBoxLayout()
+        options_row.setSpacing(4)
+        sl.addLayout(query_row)
+        sl.addLayout(options_row)
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("查找文本 / 正则表达式")
+        self.search_input.setPlaceholderText(
+            "关键字用逗号分隔，例如 timeout，disconnect，exception"
+        )
         self.search_input.returnPressed.connect(self.search_enter)
-        sl.addWidget(self.search_input, 1)
+        query_row.addWidget(self.search_input, 1)
         self.search_input.installEventFilter(self)
         self.search_scope = QComboBox()
         self.search_scope.addItems(["当前文件", "所有文件"])
-        sl.addWidget(self.search_scope)
+        options_row.addWidget(self.search_scope)
+        self.keyword_mode = QComboBox()
+        for label, mode in (
+            ("任一关键字", "any"),
+            ("全部关键字", "all"),
+            ("单个条件", "single"),
+        ):
+            self.keyword_mode.addItem(label, mode)
+        self.keyword_mode.setToolTip(
+            "多个关键字用逗号或顿号分隔。全部关键字须在同一行出现。"
+        )
+        options_row.addWidget(self.keyword_mode)
         self.search_case = QCheckBox("大小写")
-        sl.addWidget(self.search_case)
+        options_row.addWidget(self.search_case)
         self.search_regex = QCheckBox("正则")
-        sl.addWidget(self.search_regex)
+        self.search_regex.setToolTip("将整个输入作为一个正则表达式")
+        self.search_regex.toggled.connect(self._update_search_hint)
+        options_row.addWidget(self.search_regex)
+        options_row.addStretch(1)
         self.btn_next = QPushButton("下一处")
         self.btn_next.clicked.connect(self.find_next)
-        sl.addWidget(self.btn_next)
-        self.btn_filter = QPushButton("筛选全部")
+        options_row.addWidget(self.btn_next)
+        self.btn_filter = QPushButton("筛选")
         self.btn_filter.clicked.connect(self.filter_all)
-        sl.addWidget(self.btn_filter)
+        query_row.addWidget(self.btn_filter)
         self.btn_clear_filter = QPushButton("清除筛选")
         self.btn_clear_filter.setToolTip("清空筛选结果和标记，保留输入条件")
         self.btn_clear_filter.clicked.connect(self.clear_filter_results)
-        sl.addWidget(self.btn_clear_filter)
-        bclose = QPushButton("×")
-        bclose.setFixedWidth(28)
-        bclose.setText("悬浮")
-        bclose.setFixedWidth(48)
-        bclose.clicked.connect(self.toggle_search_float)
-        sl.addWidget(bclose)
+        query_row.addWidget(self.btn_clear_filter)
         self.search_box.show()
         self.viewer.installEventFilter(self)
         self.search_box.installEventFilter(self)
@@ -400,6 +425,11 @@ class AppWindow(QMainWindow):
         self.lbl_total = QLabel("0 行")
         bl.addWidget(self.lbl_total)
         bl.addStretch(1)
+        self.btn_edit_log = QPushButton("编辑日志…")
+        self.btn_edit_log.setToolTip("编辑当前日志（F2）")
+        self.btn_edit_log.clicked.connect(self.edit_log)
+        self.btn_edit_log.setEnabled(False)
+        bl.addWidget(self.btn_edit_log)
         self.input_jump = QLineEdit()
         self.input_jump.setFixedWidth(72)
         self.input_jump.setPlaceholderText("行号")
@@ -450,6 +480,15 @@ class AppWindow(QMainWindow):
         self.tbl_matches.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.tbl_matches.verticalHeader().setVisible(False)
         self.tbl_matches.verticalHeader().setDefaultSectionSize(21)
+        self.tbl_matches.verticalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Fixed
+        )
+        self.tbl_matches.setVerticalScrollMode(
+            QAbstractItemView.ScrollMode.ScrollPerItem
+        )
+        self.tbl_matches.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOn
+        )
         self.tbl_matches.setWordWrap(False)
         self.tbl_matches.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.match_model = MatchResultModel(self)
@@ -462,6 +501,22 @@ class AppWindow(QMainWindow):
         self.tbl_matches.horizontalHeader().setStretchLastSection(True)
         self.tbl_matches.doubleClicked.connect(self.match_clicked)
         self.results.addTab(self.tbl_matches, "筛选结果 (0)")
+        navigation = QWidget()
+        match_navigation = QHBoxLayout(navigation)
+        match_navigation.setContentsMargins(1, 0, 3, 0)
+        match_navigation.setSpacing(3)
+        for label, go_to in (
+            ("首条", self.tbl_matches.scrollToTop),
+            ("末条", self.tbl_matches.scrollToBottom),
+        ):
+            button = QPushButton(label)
+            button.clicked.connect(go_to)
+            match_navigation.addWidget(button)
+        self.results.setCornerWidget(navigation)
+        self.results.currentChanged.connect(
+            lambda page: navigation.setVisible(page == 2)
+        )
+        navigation.hide()
         self.vsplit.addWidget(self.results)
         self.results.setMinimumHeight(105)
         self.txt_analysis.setPlainText(
@@ -506,10 +561,12 @@ class AppWindow(QMainWindow):
         self.search_dock.show()
 
     def show_find(self):
+        self._search_for_find = True
         self.search_scope.setCurrentIndex(0)
         self._show_search_box()
 
     def show_filter(self):
+        self._search_for_find = False
         self.search_scope.setCurrentIndex(1)
         self._show_search_box()
 
@@ -522,7 +579,15 @@ class AppWindow(QMainWindow):
         self.search_input.selectAll()
 
     def search_enter(self):
-        self.filter_all() if self.search_scope.currentIndex() else self.find_next()
+        self.find_next() if self._search_for_find else self.filter_all()
+
+    def _update_search_hint(self, regex):
+        self.keyword_mode.setEnabled(not regex)
+        self.search_input.setPlaceholderText(
+            "输入正则表达式"
+            if regex
+            else "关键字用逗号分隔，例如 timeout，disconnect，exception"
+        )
 
     def update_time_widgets(self, *_):
         mode = self.combo_mode.currentText()
@@ -602,17 +667,6 @@ class AppWindow(QMainWindow):
         if self._busy():
             self.statusBar().showMessage("已有打开或分析任务正在运行")
             return
-        self._search_generation += 1
-        self._find_generation += 1
-        if self.search_worker and self.search_worker.isRunning():
-            self.search_worker.requestInterruption()
-        self._analysis_session.stop()
-        self._report_file = None
-        self._input_generation += 1
-        self.last_open_paths = paths
-        self.last_is_file_list = is_file_list
-        self._files_are_prepared = False
-        self.prepared_payload = None
         self.lbl_status.setText("正在后台解包...")
         self.progress.setValue(0)
         self.progress.show()
@@ -634,6 +688,9 @@ class AppWindow(QMainWindow):
             QMessageBox.warning(self, "打开失败", result["error"])
             return
         self.clear_filter_results()
+        self._analysis_session.stop()
+        self._input_generation += 1
+        self.prepared_payload = None
         if result.get("tempdir"):
             self._temp_dirs.add(result["tempdir"])
         self._import_notes = list(result.get("notes", []))
@@ -643,8 +700,11 @@ class AppWindow(QMainWindow):
         if record_module is not None:
             record_module.clear_record_cache()
         self.file_list_data = sorted(files, key=lambda p: os.path.basename(p).lower())
+        self._file_incident_counts = {}
         self.raw_data = OrderedDict()
         self._line_index_cache.clear()
+        self._file_revisions.clear()
+        self._set_edit_enabled(False)
         self.incidents = []
         self.current_file = None
         self.viewer.set_log_text("")
@@ -719,16 +779,18 @@ class AppWindow(QMainWindow):
         self.btn_cancel.setEnabled(running)
 
     def cancel_tasks(self):
+        if self.search_worker is not None and self.search_worker.isRunning():
+            self.clear_filter_results()
+        self._find_generation += 1
         for worker in (
             self.worker,
-            self.search_worker,
             self.find_worker,
             self.preview_worker,
             self.decrypt_worker,
         ):
             if worker is not None and worker.isRunning():
                 worker.requestInterruption()
-        self._analysis_session.stop()
+        self._refresh_cancel_state()
         self.statusBar().showMessage("正在取消后台任务，日志预览仍可使用")
 
     def toggle_search_float(self):
@@ -746,20 +808,27 @@ class AppWindow(QMainWindow):
         dialog = QDialog(self, Qt.WindowType.Tool)
         dialog.setWindowTitle("筛选与分析结果")
         dialog.resize(1080, 480)
+        sizes = self.vsplit.sizes()
+        bar = self.tbl_matches.verticalScrollBar()
+        top = bar.value()
         panel = QVBoxLayout(dialog)
         panel.setContentsMargins(0, 0, 0, 0)
         panel.addWidget(self.results)
         self._results_dialog = dialog
 
         def restore(_result):
+            old_top = bar.value()
             self._results_dialog = None
             self.results.setParent(self.vsplit)
             self.vsplit.addWidget(self.results)
             self.results.show()
-            self.vsplit.setSizes([400, 180])
+            self.vsplit.setSizes(sizes)
+            bar.setValue(old_top)
+            dialog.deleteLater()
 
         dialog.finished.connect(restore)
         dialog.show()
+        bar.setValue(top)
 
     def show_report(self):
         if not hasattr(self, "_report_dialog"):
@@ -804,21 +873,32 @@ class AppWindow(QMainWindow):
         # 旧文件的后台读取如果晚于下一次“打开目录”结束，直接丢弃，防止污染当前结果。
         if path not in self.file_list_data:
             return
-        text, offsets = payload if payload is not None else (None, None)
+        text, offsets = payload[:2] if payload is not None else (None, None)
         if text is not None:
+            if len(payload) > 2 and payload[2] is not None:
+                self._file_revisions[path] = payload[2]
+            else:
+                self._file_revisions.pop(path, None)
             self._line_index_cache[path] = offsets
             self._line_index_cache.move_to_end(path)
-            while len(self._line_index_cache) > 3:
-                self._line_index_cache.popitem(last=False)
             self.raw_data[path] = text
             if isinstance(self.raw_data, OrderedDict):
                 self.raw_data.move_to_end(path)
-            # 只缓存最近打开的三个文件，避免数百 MB 日志重复占内存。
-            if self.prepared_payload is None:
-                while len(self.raw_data) > 3:
-                    self.raw_data.popitem(last=False)
+            cache_bytes = sum(
+                sys.getsizeof(self.raw_data[p]) + sys.getsizeof(index)
+                for p, index in self._line_index_cache.items()
+            )
+            while len(self._line_index_cache) > 1 and (
+                len(self._line_index_cache) > 3 or cache_bytes > LOG_VIEW_CACHE_BYTES
+            ):
+                evicted, index = self._line_index_cache.popitem(last=False)
+                cache_bytes -= sys.getsizeof(
+                    self.raw_data.pop(evicted)
+                ) + sys.getsizeof(index)
+                self._file_revisions.pop(evicted, None)
         if path == self.current_file:
             self._display_log_text(path, text, offsets)
+            self._set_edit_enabled(path in self._file_revisions)
             self.viewer.goto(0)
             self.lbl_total.setText(
                 f"{self.viewer.line_count():,} 行  |  {(len(text) if text else 0) / 1024 / 1024:.1f} MB"
@@ -848,6 +928,75 @@ class AppWindow(QMainWindow):
             self.viewer.set_filter_highlights(
                 self._filter_highlights_by_file.get(path, {})
             )
+
+    def _set_edit_enabled(self, enabled):
+        self.btn_edit_log.setEnabled(enabled)
+        self.action_edit.setEnabled(enabled)
+
+    def _cancel_search_for_log_save(self):
+        self._find_generation += 1
+        for worker in (self.search_worker, self.find_worker):
+            if worker is not None and worker.isRunning():
+                worker.requestInterruption()
+
+    def edit_log(self):
+        path = self.current_file
+        if path not in self._file_revisions:
+            return
+        if self._busy():
+            self.statusBar().showMessage("等待当前任务完成后再编辑日志")
+            return
+        from .log_edit import LogEditDialog
+
+        line, column = self.viewer.current_line_col()
+        dialog = LogEditDialog(
+            path,
+            self.raw_data[path],
+            self._line_index_cache[path],
+            self._file_revisions[path],
+            self.viewer.selection_range()[0],
+            self._temp_dirs,
+            self,
+        )
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        destination = str(dialog.destination)
+        dialog.deleteLater()
+        if not accepted:
+            return
+        self.clear_filter_results()
+        self.find_key = None
+        self.find_offset = 0
+        self.has_analyzed = False
+        self._full_report = ""
+        self._report_file = None
+        self._report_truncated = False
+        self.txt_analysis.setPlainText("日志已保存。按 F5 重新分析。")
+        if hasattr(self, "_report_dialog"):
+            self._report_dialog.hide()
+        self.incidents = []
+        self.build_incident_model()
+        self._update_file_incident_counts({})
+        if destination not in self.file_list_data:
+            row = self.file_list_data.index(path)
+            self.file_list_data[row] = destination
+            item = self.list_files.item(row)
+            item.setText(Path(destination).name)
+            item.setToolTip(destination)
+            if path in self._tab_paths:
+                tab = self._tab_paths.index(path)
+                self._tab_paths[tab] = destination
+                self.tabs.setTabText(tab, Path(destination).name)
+                self.tabs.setTabToolTip(tab, destination)
+            self.last_open_paths = self.file_list_data + self._import_metadata_paths
+            self.raw_data.pop(path, None)
+            self._line_index_cache.pop(path, None)
+            self._file_revisions.pop(path, None)
+        self.raw_data.pop(destination, None)
+        self._line_index_cache.pop(destination, None)
+        self._file_revisions.pop(destination, None)
+        self.current_file = None
+        self.goto(destination, line - 1, column - 1)
+        self.statusBar().showMessage(f"日志已保存：{destination}")
 
     def _busy(self):
         return (
@@ -881,11 +1030,6 @@ class AppWindow(QMainWindow):
             window = max(1, min(180, int(self.input_window.text())))
         except ValueError:
             window = 10
-        self._search_generation += 1
-        self._find_generation += 1
-        if self.search_worker and self.search_worker.isRunning():
-            self.search_worker.requestInterruption()
-        self.btn_filter.setEnabled(True)
         self.lbl_status.setText("分析中...")
         self.progress.setValue(0)
         self.progress.show()
@@ -941,16 +1085,33 @@ class AppWindow(QMainWindow):
             self.lbl_status.setText("分析失败")
             QMessageBox.warning(self, "分析失败", str(data["error"]))
             return
-        self.clear_filter_results()
         # Avoid destroying/reconstructing the editor until the worker is finished.
         if data.get("preprocess_dir"):
             self._temp_dirs.add(data["preprocess_dir"])
-        self.raw_data = OrderedDict()
+        files = sorted(
+            data.get("file_paths", data.get("files_content", {})),
+            key=lambda p: os.path.basename(p).lower(),
+        )
+        different_files = set(files) != set(self.file_list_data)
+        refresh_files = different_files or (
+            self.has_analyzed and data.get("source_changed")
+        )
+        selected_path = self.current_file
+        if refresh_files:
+            self.clear_filter_results()
+            self._input_generation += 1
+            self._pending_selected_path = self._pending_goto = None
+            self.raw_data = OrderedDict()
+            self._line_index_cache.clear()
+            self._file_revisions.clear()
+            self.find_key = None
+            self.current_file = None
+            self.viewer.set_log_text("")
+            self._set_edit_enabled(False)
         self.last_analysis_metadata = {
             "reused_cache": data.get("reused_cache"),
             "process_token": data.get("prepared_payload", {}).get("process_token"),
         }
-        self._line_index_cache.clear()
         self.prepared_payload = data.get("prepared_payload")
         self.incidents = data.get("incidents", [])
         self.device_info = data.get("device_info", {})
@@ -962,42 +1123,37 @@ class AppWindow(QMainWindow):
         self._report_file = data.get("report_path")
         self._report_truncated = data.get("report_truncated", False)
         self.txt_analysis.setPlainText(self._report_preview())
-        self.file_list_data = sorted(
-            data.get("file_paths", data.get("files_content", {})),
-            key=lambda p: os.path.basename(p).lower(),
+        if different_files:
+            self.file_list_data = files
+            self._file_incident_counts = {}
+            self.list_files.blockSignals(True)
+            self.tabs.blockSignals(True)
+            self.list_files.clear()
+            while self.tabs.count():
+                self.tabs.removeTab(0)
+            self._tab_paths = []
+            self.list_files.addItems([Path(path).name for path in files])
+            for row, path in enumerate(files):
+                self.list_files.item(row).setToolTip(path)
+            self.tabs.blockSignals(False)
+            self.list_files.blockSignals(False)
+        self._update_file_incident_counts(
+            Counter(e.get("full_path") for e in self.incidents)
         )
-        self._find_generation += 1
-        self.find_key = None
-        count = Counter(e.get("full_path") for e in self.incidents)
-        self.list_files.blockSignals(True)
-        self.tabs.blockSignals(True)
-        self.list_files.clear()
-        while self.tabs.count():
-            self.tabs.removeTab(0)
-        self._tab_paths = []
-        self.list_files.addItems(
-            [
-                os.path.basename(p) + (f"  ({count[p]})" if count[p] else "")
-                for p in self.file_list_data
-            ]
-        )
-        # 虚拟化标签：只保留最近打开的 24 个，不给每个日志创建 Qt Tab。
-        for i, p in enumerate(self.file_list_data):
-            self.list_files.item(i).setToolTip(p)
-            if count[p]:
-                self.list_files.item(i).setForeground(QColor("#CF222E"))
-        self.tabs.blockSignals(False)
-        self.list_files.blockSignals(False)
         self.lbl_files.setText(f"文件 ({len(self.file_list_data)})")
-        self.btn_filter.setEnabled(True)
-        self.match_model.set_rows([])
-        self.results.setTabText(2, "筛选结果 (0)")
         self.build_incident_model()
-        self.results.setCurrentIndex(0)
-        self.results.show()
-        self.current_file = None
-        if self.file_list_data:
-            self.select_file_by_path(self.file_list_data[0])
+        keep_filter = self.results.currentIndex() == 2 and (
+            self.match_model.search_spec is not None or not self.btn_filter.isEnabled()
+        )
+        if not keep_filter:
+            self.results.setCurrentIndex(0)
+            self.results.show()
+        if self.current_file is None and self.file_list_data:
+            self.select_file_by_path(
+                selected_path
+                if selected_path in self.file_list_data
+                else self.file_list_data[0]
+            )
         elapsed = data.get("analysis_seconds")
         tail = f" | {elapsed:.1f}s" if isinstance(elapsed, (float, int)) else ""
         errs = data.get("analysis_errors") or []
@@ -1013,9 +1169,21 @@ class AppWindow(QMainWindow):
         )
         self.lbl_status.setText(message)
         self.statusBar().showMessage(message)
-        self.show_report()
+        typing_search = self.search_input.hasFocus() and bool(self.search_input.text())
+        if not keep_filter and not typing_search:
+            self.show_report()
         if errs:
             self.lbl_status.setToolTip("\n".join(errs[:30]))
+
+    def _update_file_incident_counts(self, counts):
+        previous = self._file_incident_counts
+        for row, path in enumerate(self.file_list_data):
+            count = counts.get(path, 0)
+            if count != previous.get(path, 0):
+                item = self.list_files.item(row)
+                item.setText(Path(path).name + (f"  ({count})" if count else ""))
+                item.setForeground(QBrush(QColor("#CF222E")) if count else QBrush())
+        self._file_incident_counts = counts
 
     def build_incident_model(self):
         self.incident_rows = sorted(
@@ -1099,6 +1267,7 @@ class AppWindow(QMainWindow):
                     path, self.raw_data[path], self._line_index_cache[path]
                 )
                 self.viewer.goto(0)
+                self._set_edit_enabled(path in self._file_revisions)
                 self._line_index_cache.move_to_end(path)
                 self.raw_data.move_to_end(path) if isinstance(
                     self.raw_data, OrderedDict
@@ -1108,6 +1277,7 @@ class AppWindow(QMainWindow):
                     f"{self.viewer.line_count():,} 行 | {len(text) / 1024 / 1024:.1f} MB"
                 )
             else:
+                self._set_edit_enabled(False)
                 self.viewer.set_log_text("正在后台建立行索引...")
                 self.lbl_total.setText("读取中...")
                 self._start_file_read(path)
@@ -1219,18 +1389,24 @@ class AppWindow(QMainWindow):
         self.statusBar().showMessage(f"命中：第 {lineno + 1:,} 行")
 
     def filter_all(self):
+        self._search_for_find = False
         if self.search_worker and self.search_worker.isRunning():
             self.statusBar().showMessage("筛选正在进行")
             return
         query = self.search_input.text()
         if not query:
             return
+        mode = self.keyword_mode.currentData()
+        if self.search_regex.isChecked() or not any(c in query for c in ",，、"):
+            mode = "single"
         if self.search_scope.currentIndex() == 0:
             if not self.current_file:
                 return
-            data = {self.current_file: self.raw_data.get(self.current_file)}
+            paths = [self.current_file]
         else:
-            data = {p: self.raw_data.get(p) for p in self.file_list_data}
+            paths = self.file_list_data
+        if not paths:
+            return
         self.clear_filter_results()
         self.btn_filter.setEnabled(False)
         self.results.setCurrentIndex(2)
@@ -1241,23 +1417,27 @@ class AppWindow(QMainWindow):
         from .job_process import SearchProcess
 
         worker = SearchProcess(
-            data, query, self.search_regex.isChecked(), self.search_case.isChecked()
+            paths,
+            query,
+            self.search_regex.isChecked(),
+            self.search_case.isChecked(),
+            mode,
         )
         self.btn_cancel.setEnabled(True)
         self.search_worker = worker
-        worker.completed.connect(
-            lambda rows, trunc: (
-                self.search_finished(rows, trunc)
-                if epoch == self._search_generation
-                else None
-            )
-        )
+        worker.completed.connect(lambda rows: self._filter_completed(rows, epoch))
         worker.failed.connect(
             lambda error: (
                 self.search_failed(error) if epoch == self._search_generation else None
             )
         )
         worker.start()
+
+    def _filter_completed(self, rows, generation):
+        if generation == self._search_generation and not self._closing:
+            self.search_finished(rows)
+        elif isinstance(rows, DiskMatchRows):
+            rows.close()
 
     def _search_text_changed(self, text):
         self._find_generation += 1
@@ -1272,13 +1452,13 @@ class AppWindow(QMainWindow):
         if self.search_worker and self.search_worker.isRunning():
             self.search_worker.requestInterruption()
         self._filter_highlights_by_file = {}
-        self.match_model.set_rows([])
         self.viewer.set_filter_highlights({}, clear_active=True)
+        self.match_model.set_rows([])
         self.results.setTabText(2, "筛选结果 (0)")
         self.results.setTabToolTip(2, "")
         self.btn_filter.setEnabled(True)
 
-    def search_finished(self, rows, truncated):
+    def search_finished(self, rows):
         self.btn_cancel.setEnabled(False)
         self.btn_filter.setEnabled(True)
         self.match_model.set_rows(rows)
@@ -1290,10 +1470,10 @@ class AppWindow(QMainWindow):
             else {}
         )
         self.viewer.set_filter_highlights(highlights)
+        self.tbl_matches.scrollToTop()
         spec = self.match_model.search_spec
         self.results.setTabToolTip(2, "筛选条件：" + spec.query if spec else "")
-        label = f"筛选结果 ({len(rows):,}" + ("，已达到上限)" if truncated else ")")
-        self.results.setTabText(2, label)
+        self.results.setTabText(2, f"筛选结果 ({len(rows):,})")
         self.results.setCurrentIndex(2)
         if spec is not None and self.chk_float_results.isChecked():
             if getattr(self, "_results_dialog", None) is None:
@@ -1301,13 +1481,10 @@ class AppWindow(QMainWindow):
             else:
                 self._results_dialog.show()
                 self._results_dialog.raise_()
+        skipped = rows.skipped if isinstance(rows, DiskMatchRows) else 0
         self.statusBar().showMessage(
-            f"匹配 {len(rows):,} 行"
-            + (
-                "；显示上限 2.5 万条，请缩小搜索范围"
-                if truncated
-                else "；双击跳到原始行"
-            )
+            f"匹配 {len(rows):,} 行；双击跳到原始行"
+            + (f"；{skipped:,} 个文件无法读取" if skipped else "")
         )
 
     def search_failed(self, error):
@@ -1522,6 +1699,8 @@ class AppWindow(QMainWindow):
             QTimer.singleShot(75, self.close)
             return
         self._analysis_session.stop()
+        self.viewer.set_filter_highlights({})
+        self.match_model.set_rows([])
         for folder in self._temp_dirs:
             shutil.rmtree(folder, ignore_errors=True)
         self._task_ui_timer.stop()

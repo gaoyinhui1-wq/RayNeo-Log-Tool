@@ -9,8 +9,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from gui_support import GuiCase
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import QPoint, Qt, QTimer
 from PyQt6.QtTest import QTest
+from PyQt6.QtWidgets import QStyle, QStyleOptionSlider
 
 from rayneo import rules
 from rayneo.job_process import AnalysisProcess, JobSession
@@ -80,6 +81,7 @@ class ProcessUiTests(GuiCase):
         self.assertFalse(self.win.search_dock.isFloating())
         self.assertTrue(self.win.search_dock.isVisible())
         path = self.source("hello disconnect\n")
+        self.win.chk_float_results.setChecked(True)
         self.win.start_preview([path], True)
         self.wait(lambda: not self.win._busy() and self.win.file_read_worker is None)
         self.win.search_input.setText("disconnect")
@@ -128,6 +130,52 @@ class ProcessUiTests(GuiCase):
             )
         )
         self.assertEqual(len(self.win.match_model.rows), 1)
+
+    def test_multi_keyword_filter_drags_past_old_limit_to_true_last_row(self):
+        text = "TIMEOUT one\n中文 exception\n" * 15000 + "timeout and exception last\n"
+        path = self.source(text)
+        self.win.chk_float_results.setChecked(False)
+        self.win.start_preview([path], True)
+        self.wait(lambda: not self.win._busy() and self.win.file_read_worker is None)
+        self.win.search_input.setText("timeout，exception")
+        QTest.keyClick(self.win.search_input, Qt.Key.Key_Return)
+        self.wait(lambda: self.win.match_model.rowCount() == 30001)
+        self.assertTrue(self.win.search_dock.isVisible())
+        self.win.vsplit.setSizes([120, 240])
+        self.app.processEvents()
+        table = self.win.tbl_matches
+        bar = table.verticalScrollBar()
+        option = QStyleOptionSlider()
+        option.initFrom(bar)
+        option.orientation = Qt.Orientation.Vertical
+        option.minimum, option.maximum = bar.minimum(), bar.maximum()
+        option.pageStep = bar.pageStep()
+        slider = bar.style().subControlRect(
+            QStyle.ComplexControl.CC_ScrollBar,
+            option,
+            QStyle.SubControl.SC_ScrollBarSlider,
+            bar,
+        )
+        self.assertGreater(bar.maximum(), 25000)
+        start = slider.center()
+        QTest.mousePress(bar, Qt.MouseButton.LeftButton, pos=start)
+        finish = QPoint(start.x(), bar.height() - 1)
+        QTest.mouseMove(bar, finish)
+        QTest.mouseRelease(bar, Qt.MouseButton.LeftButton, pos=finish)
+        self.assertEqual(bar.value(), bar.maximum())
+        tail = self.win.match_model.index(30000, 2)
+        self.assertTrue(table.viewport().rect().intersects(table.visualRect(tail)))
+        self.win.match_clicked(tail)
+        self.assertEqual(self.win.viewer.selected_text(), "timeout")
+        self.assertEqual(self.win.viewer.current_line_col()[0], 30001)
+
+        self.win.keyword_mode.setCurrentIndex(1)
+        self.win.filter_all()
+        self.wait(lambda: self.win.match_model.rowCount() == 1)
+        self.assertEqual(
+            self.win.match_model.rows[0], (path, 30001, "timeout and exception last")
+        )
+        self.assertEqual(self.win.match_model.row_spans(0), ((0, 7), (12, 21)))
 
     def test_cancelled_before_thread_starts_does_not_spawn_a_process(self):
         session = JobSession()

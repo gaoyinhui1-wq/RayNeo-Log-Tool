@@ -411,6 +411,14 @@ def extract_device_info(files_content, reference_time=None):
 
     version_fields = {"手机系统版本", "App版本", "RayneoNet SDK", "眼镜系统版本"}
 
+    from .indexing import token_automaton
+
+    all_markers = tuple(
+        dict.fromkeys(
+            marker.lower() for values in markers.values() for marker in values
+        )
+    )
+    automaton = token_automaton(all_markers)
     for path, text in items:
         if not text:
             continue
@@ -418,6 +426,16 @@ def extract_device_info(files_content, reference_time=None):
         glass_side = _is_glasses_side_path(path) or _is_glasses_metadata_only(path)
         # 每个文件只做一次 lowercase，避免每个 marker 重复构造整份日志的小写副本。
         text_low = text.lower()
+        present = None
+        if automaton is not None:
+            present = set()
+            for count, (end, size) in enumerate(automaton.iter(text_low)):
+                if count == 2048:
+                    # Dense logs can be cheaper to search using the existing
+                    # bounded per-field lookups.
+                    present = None
+                    break
+                present.add(text_low[end - size + 1 : end + 1])
         for field in fields:
             if glass_side and field != "眼镜系统版本":
                 continue
@@ -431,6 +449,8 @@ def extract_device_info(files_content, reference_time=None):
             reverse_scan = field in version_fields
             for marker in markers[field]:
                 marker_low = marker.lower()
+                if present is not None and marker_low not in present:
+                    continue
                 if reverse_scan:
                     end_pos = len(text_low)
                     while hit_count < max_hits:

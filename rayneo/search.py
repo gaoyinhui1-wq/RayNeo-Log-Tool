@@ -7,7 +7,8 @@ from PyQt6.QtGui import QColor
 from PyQt6.QtCore import QAbstractTableModel, QModelIndex
 from PyQt6.QtGui import QBrush
 from .ingestion import read_text_file
-from .matching import HighlightedRows, SearchSpec, match_spans
+from .matching import HighlightedRows, LineMatcher, SearchSpec
+from .filter_results import DiskMatchRows
 
 
 def scan_log_matches(
@@ -24,13 +25,8 @@ def scan_log_matches(
     """Line-streaming search; only one pass, never builds a lowercased copy of all logs."""
     if not query:
         return [], False
-    pattern = (
-        re.compile(query if regex else re.escape(query), 0 if case_sensitive else re.I)
-        if regex or not case_sensitive
-        else None
-    )
     spec = SearchSpec(query, regex, case_sensitive)
-    highlight_pattern = spec.compile() if include_spans else None
+    matcher = LineMatcher(spec)
     matches = HighlightedRows(spec) if include_spans else []
     preview_used = 0
     for path, content in data.items():
@@ -46,15 +42,15 @@ def scan_log_matches(
             ):
                 return matches, False
             line = line.rstrip("\r\n")
-            found = bool(pattern.search(line)) if pattern is not None else query in line
-            if found:
+            try:
+                hit = matcher.hits(line, collect=include_spans, cancelled=cancelled)
+            except InterruptedError:
+                return matches, False
+            if hit is not None:
                 if include_spans:
-                    try:
-                        spans = match_spans(highlight_pattern, line, cancelled)
-                    except InterruptedError:
-                        return matches, False
+                    first, spans = hit
                     matches.spans.append(spans)
-                    matches.first_matches.append(highlight_pattern.search(line).span())
+                    matches.first_matches.append(first)
                 shown = line
                 if preview_chars is not None:
                     limit = min(preview_chars, max(0, preview_budget - preview_used))
@@ -136,23 +132,30 @@ class MatchResultModel(QAbstractTableModel):
         self.first_matches = ()
 
     def set_rows(self, rows):
+        previous = self.rows
         self.beginResetModel()
         self.rows = rows
         self.search_spec = getattr(rows, "spec", None)
         self.highlights = tuple(getattr(rows, "spans", ()))
         self.first_matches = tuple(getattr(rows, "first_matches", ()))
-        self._name_cache = {
-            p: os.path.basename(p) for p, *_ in rows[:: max(1, len(rows) // 2500)]
-        }
+        self._name_cache = {}
         self.endResetModel()
+        if isinstance(previous, DiskMatchRows) and previous is not rows:
+            previous.close()
 
     def row_spans(self, row):
+        if isinstance(self.rows, DiskMatchRows):
+            return self.rows.row_spans(row)
         return self.highlights[row] if 0 <= row < len(self.highlights) else ()
 
     def first_match(self, row):
+        if isinstance(self.rows, DiskMatchRows):
+            return self.rows.first_match(row)
         return self.first_matches[row] if 0 <= row < len(self.first_matches) else None
 
     def source_highlights(self):
+        if isinstance(self.rows, DiskMatchRows):
+            return self.rows.source_highlights()
         by_file = {}
         for (path, number, _raw), spans in zip(self.rows, self.highlights):
             by_file.setdefault(path, {})[number - 1] = spans
@@ -178,9 +181,11 @@ class MatchResultModel(QAbstractTableModel):
         path, number, raw = self.rows[index.row()]
         c = index.column()
         if role == Qt.ItemDataRole.DisplayRole:
-            return (
-                os.path.basename(path) if c == 0 else (str(number) if c == 1 else raw)
-            )
+            if c == 0:
+                if path not in self._name_cache:
+                    self._name_cache[path] = os.path.basename(path)
+                return self._name_cache[path]
+            return str(number) if c == 1 else raw
         if role == Qt.ItemDataRole.BackgroundRole and c == 2:
             return QBrush(QColor("#DDF4FF"))
         if role == Qt.ItemDataRole.TextAlignmentRole and c == 1:

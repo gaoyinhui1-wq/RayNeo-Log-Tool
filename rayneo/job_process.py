@@ -184,10 +184,10 @@ class AnalysisProcess(QThread):
 
 
 class SearchProcess(QThread):
-    completed = pyqtSignal(object, bool)
+    completed = pyqtSignal(object)
     failed = pyqtSignal(str)
 
-    def __init__(self, paths, query, regex, case_sensitive):
+    def __init__(self, paths, query, regex, case_sensitive, keyword_mode="single"):
         super().__init__()
         self.session = JobSession()
         self._generation = self.session.generation
@@ -197,6 +197,7 @@ class SearchProcess(QThread):
             "query": query,
             "regex": regex,
             "case_sensitive": case_sensitive,
+            "keyword_mode": keyword_mode,
         }
 
     def requestInterruption(self):
@@ -204,25 +205,33 @@ class SearchProcess(QThread):
         self.session.stop()
 
     def run(self):
+        directory = None
         try:
+            from .filter_results import DiskMatchRows
+            from .matching import SearchSpec
+
             result = self.session.execute(self.request, generation=self._generation)
             if result.get("error"):
                 raise RuntimeError(result["error"])
-            from .matching import HighlightedRows, SearchSpec
-
-            rows = HighlightedRows(SearchSpec(**result["spec"]))
-            rows.extend(result["rows"])
-            rows.spans = [
-                tuple(tuple(span) for span in spans) for spans in result["spans"]
-            ]
-            rows.first_matches = [tuple(span) for span in result["first_matches"]]
-            self.completed.emit(rows, result["truncated"])
+            directory = tempfile.TemporaryDirectory(prefix="rayneo_filter_")
+            os.replace(result["database"], Path(directory.name, "matches.sqlite"))
+            rows = DiskMatchRows(
+                directory,
+                result["count"],
+                result["files"],
+                SearchSpec(**result["spec"]),
+                result["skipped"],
+            )
+            directory = None
+            self.completed.emit(rows)
         except JobCancelled:
-            self.completed.emit([], False)
+            self.completed.emit([])
         except Exception as exc:
             self.failed.emit(str(exc))
         finally:
             self.session.stop()
+            if directory is not None:
+                directory.cleanup()
 
 
 class FindProcess(QThread):
@@ -344,6 +353,9 @@ def serve(directory):
                 worker.run()
                 data = outcome[0] if outcome else {"error": "后台任务未返回结果"}
                 if not data.get("error"):
+                    data["source_changed"] = (
+                        fingerprint is not None and signature != fingerprint
+                    )
                     prepared = data.pop("prepared_payload")
                     fingerprint = signature
                     data["file_paths"] = list(data.pop("files_content"))
@@ -385,26 +397,23 @@ def serve(directory):
                     data["point_results"] = []
                 send("result", data=data)
             elif operation == "filter":
-                from .search import scan_log_matches
-
-                rows, truncated = scan_log_matches(
-                    dict.fromkeys(request["paths"]),
-                    request["query"],
-                    request["regex"],
-                    request["case_sensitive"],
-                    include_spans=True,
-                    preview_chars=8192,
-                )
                 from dataclasses import asdict
 
+                from .filter_results import write_filter_results
+                from .matching import SearchSpec
+
+                paths = request.pop("paths")
+                destination = root / "matches.sqlite"
+                spec = SearchSpec(**request)
+                count, files, skipped = write_filter_results(destination, paths, spec)
                 send(
                     "result",
                     data={
-                        "rows": rows,
-                        "spec": asdict(rows.spec),
-                        "spans": rows.spans,
-                        "first_matches": rows.first_matches,
-                        "truncated": truncated,
+                        "count": count,
+                        "files": files,
+                        "spec": asdict(spec),
+                        "skipped": skipped,
+                        "database": str(destination),
                     },
                 )
             elif operation == "find":

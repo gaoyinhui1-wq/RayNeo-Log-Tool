@@ -1,10 +1,17 @@
 # RayNeo Log Tool
 
-基于你提供的 `RayNeo_Log_Tool.py` 和 `异常判定规则.json` 修改的桌面日志工具。采用轻量模块化项目：仍只有一个启动入口，不需要服务器、数据库或账号。原始上传文件与 ADClose 仓库均未修改。
+基于你提供的 `RayNeo_Log_Tool.py` 和 `异常判定规则.json` 修改的桌面日志工具。程序只有一个启动入口，日志在本机处理，无需部署服务或配置数据库。原始上传文件与 ADClose 仓库均未修改。
+
+## 1.5.0 预览
+
+- 筛选栏启动后常驻顶部。关键字用逗号或顿号分隔，例如 `timeout，disconnect，exception`。可选“任一关键字”“全部关键字”（同一行满足所有词）或“单个条件”。勾选“正则”会将整段输入作为一个表达式。
+- 结果默认显示在底部，滚动条可拖到末条，也可点“首条”或“末条”。后台流式读取日志，完整保存命中行索引，界面按需加载结果。结果表显示行预览，双击定位完整原文。
+- 打开日志后，点“编辑日志…”或按 F2。普通文本可保存到原文件，也可另存为。大文件分段编辑，压缩包解出的日志须另存为文本文件。保存后可立即筛选，按 F5 重新生成分析报告。
+- 分析和筛选可并行。相同日志和范围的重分析复用设备信息与已有索引，原文预览缓存受文件数量和内存用量限制。
 
 ## 1.4.0 性能与连接证据判定
 
-**Windows x64 最新程序包已构建成功（40.1 MB）**：[下载 1.4.0 程序包](https://github.com/gaoyinhui1-wq/RayNeo-Log-Tool/actions/runs/41962595510/artifacts/13386730045) · [查看构建记录](https://github.com/gaoyinhui1-wq/RayNeo-Log-Tool/actions/runs/41962595510)。需要登录 GitHub，完整解压后双击 `RayNeo_Log_Tool.exe`。本包对应源码 `1e03e39`，Windows 上 94 项回归测试及打包后的 EXE 实际启动检查全部通过。
+**1.4.0 Windows x64 程序包（40.1 MB）**需要登录 GitHub，完整解压后双击 `RayNeo_Log_Tool.exe`。本包对应源码 `1e03e39`，Windows 上 94 项回归测试及打包后的 EXE 实际启动检查全部通过。[下载 1.4.0 程序包](https://github.com/gaoyinhui1-wq/RayNeo-Log-Tool/actions/runs/41962595510/artifacts/13386730045) · [查看构建记录](https://github.com/gaoyinhui1-wq/RayNeo-Log-Tool/actions/runs/41962595510)
 
 
 - 分析、查找和筛选运行在独立进程，避免耗时正则持有 GUI 的 Python GIL；顶部“取消任务”可停止这些进程。读取、解包仍由后台线程处理并检查取消信号。完整日志与分析缓存保留在分析进程，GUI 只缓存最近查看的 3 个文件。
@@ -27,7 +34,7 @@
 
 ![可关闭并返回底部的筛选浮窗（合成日志）](docs/floating-results-1.4.png)
 
-最新 Windows 程序包请从 [Build Windows EXE](https://github.com/gaoyinhui1-wq/RayNeo-Log-Tool/actions/workflows/build-windows.yml) 的 **1.4.0 成功运行记录**下载 `RayNeo-Log-Tool-Windows-x64`，完整解压后使用。下方 1.3.2 链接是旧版，不含上述更新。
+Windows 构建产物名为 `RayNeo-Log-Tool-Windows-x64`，完整解压后即可使用。[Build Windows EXE](https://github.com/gaoyinhui1-wq/RayNeo-Log-Tool/actions/workflows/build-windows.yml)
 
 ## 1.3.2 Windows 自动构建（历史版本）
 
@@ -60,7 +67,7 @@ python .\RayNeo_Log_Tool.py
 
 前两行应均返回 `True`。若你修改过规则，请把旧目录的 `异常判定规则.json` 复制到新目录。已安装依赖的虚拟环境可以继续用于运行源码。
 
-## 1.3 筛选命中标记
+## 1.3 筛选命中标记（历史版本）
 
 - 下方“筛选结果”的匹配片段显示为 **深红文字 + 浅黄色底色**，同一行的多处命中都会标出，选中结果行时仍能看清。
 - 原始日志区同步标记这些结果对应的命中位置；切换文件时恢复对应文件的标记。原文和复制内容保持不变。

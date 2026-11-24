@@ -31,7 +31,9 @@ def candidate_starts(text, tokens, regex_terms):
             fallback.append(term)
     # Python re.I additionally equates dotless i and long s with ASCII letters.
     folds = str.maketrans({"ı": "i", "ſ": "s"})
-    low = text.lower().translate(folds)
+    low = text.lower()
+    if not low.isascii():
+        low = low.translate(folds)
     tokens = tuple(dict.fromkeys(t.lower().translate(folds) for t in tokens if t))
     automaton = token_automaton(tokens) if tokens else None
     if len(low) != len(text):
@@ -77,15 +79,17 @@ def candidate_starts(text, tokens, regex_terms):
 
 
 def observation_times(text):
-    result = []
+    result = set()
+    previous_start = -1
     for match in LOG_TIME_RE.finditer(text):
         start = text.rfind("\n", 0, match.start()) + 1
-        if match.start() - start > 76:
+        if start == previous_start or match.start() - start > 76:
             continue
+        previous_start = start
         value = parse_log_time(text[start : start + 96])
         if value is not None:
-            result.append(value)
-    return sorted(set(result))
+            result.add(value)
+    return sorted(result)
 
 
 @lru_cache(maxsize=2048)
