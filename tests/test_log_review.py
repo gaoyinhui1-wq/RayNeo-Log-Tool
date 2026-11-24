@@ -11,6 +11,7 @@ from PyQt6.QtGui import QTextCursor
 from PyQt6.QtWidgets import QApplication
 
 from gui_support import GuiCase
+from rayneo.connection_timing import read_connection_timings
 from rayneo.diagnosis import diagnose, diagnosis_report, scan_causes, select_causes
 from rayneo.ingestion import VLOG_AAD, VLOG_DEFAULT_KEY_BASE64, VLOG_MAGIC
 from rayneo.log_edit import LogEditDialog
@@ -80,6 +81,70 @@ class FocusedDiagnosisTests(TestCase):
         )
         self.assertEqual([x["rule_id"] for x in result], ["notify_permission"])
 
+    def test_notification_path_keeps_the_failing_stage_and_ignores_wrong_recovery(self):
+        result = self.diagnose(
+            "2026-05-01 10:00:00 BLE physical connect success deviceId=aa\n"
+            "2026-05-01 10:00:02 ANCS subscribe failed deviceId=aa\n"
+            "2026-05-01 10:00:03 ANCS connected deviceId=aa\n"
+            "2026-05-01 10:00:04 NotificationSync send failed deviceId=aa notificationId=45\n"
+            "2026-05-01 10:00:05 NotificationSync delivered deviceId=aa notificationId=45\n"
+            "2026-05-01 10:00:06 GlassesNotification display failed deviceId=aa notificationId=45\n"
+        )
+        self.assertEqual(
+            [item["name"] for item in result], ["眼镜显示通知失败", "ANCS 订阅失败"]
+        )
+        self.assertNotIn("此前", diagnosis_report(result, {}))
+
+    def test_notification_link_needs_order_identity_and_no_intervening_recovery(self):
+        disconnect = "2026-05-01 10:00:01 BLE physical disconnect deviceId=aa\n"
+        failure = "2026-05-01 10:00:03 NotificationSync send failed deviceId=aa notificationId=42\n"
+        result = self.diagnose(disconnect + failure)
+        self.assertEqual(result[0]["status"], "关联")
+        self.assertEqual(len(result[0]["steps"]), 2)
+        self.assertIn("BLE 断开。", diagnosis_report(result, {}))
+
+        for preceding in (
+            disconnect.replace("aa", "bb"),
+            disconnect.replace("00:01", "00:04"),
+            disconnect
+            + "2026-05-01 10:00:02 BLE physical connect success deviceId=aa\n",
+        ):
+            with self.subTest(preceding=preceding):
+                result = self.diagnose(preceding + failure)
+                self.assertFalse(result[0]["steps"])
+                self.assertEqual(result[0]["custom_analysis"], "手机通知转发失败。")
+
+        explicit = self.diagnose(
+            "2026-05-01 10:00:00 BLE physical connect success deviceId=aa\n"
+            "2026-05-01 10:00:02 RNLink disconnected deviceId=aa\n"
+            "2026-05-01 10:00:03 NotificationSync send failed: RNLink not connected deviceId=aa\n"
+        )
+        self.assertIn("RNLink 链路错误", explicit[0]["custom_analysis"])
+        self.assertEqual(explicit[0]["status"], "明确")
+        self.assertEqual(len(explicit[0]["steps"]), 2)
+
+    def test_notification_trace_can_link_two_files_only_for_the_same_device(self):
+        with TemporaryDirectory() as folder:
+            phone, glasses = Path(folder) / "phone.log", Path(folder) / "glasses.log"
+            phone.write_text(
+                "2026-05-01 10:00:00 Bluetooth stack crashed deviceId=aa\n",
+                encoding="utf-8",
+            )
+            glasses.write_text(
+                "2026-05-01 10:00:02 ANCS subscribe failed deviceId=aa\n",
+                encoding="utf-8",
+            )
+            items, _, _ = diagnose([str(phone), str(glasses)], (), (), lambda *_: None)
+            self.assertEqual([item["rule_id"] for item in items], ["phone_bt"])
+            report = diagnosis_report(items, {})
+            self.assertIn("phone.log:1", report)
+            self.assertIn("glasses.log:1", report)
+            glasses.write_text(
+                "2026-05-01 10:00:02 ANCS subscribe failed\n", encoding="utf-8"
+            )
+            items, _, _ = diagnose([str(phone), str(glasses)], (), (), lambda *_: None)
+            self.assertEqual([item["rule_id"] for item in items], ["phone_bt", "ancs"])
+
     def test_unsigned_crash_statistics_payload_and_generic_timeouts_are_ignored(self):
         self.assertEqual(
             self.diagnose(
@@ -122,10 +187,90 @@ class FocusedDiagnosisTests(TestCase):
                 self.assertIsNone(timeline)
 
 
+class ConnectionTimingTests(TestCase):
+    def test_timing_gives_each_attempt_a_real_endpoint_and_keeps_unknowns_open(self):
+        with TemporaryDirectory() as folder:
+            source = Path(folder) / "logcat_2026-05-01.log"
+            source.write_text(
+                "05-01 10:00:00.120 createBond() deviceId=aa\n"
+                "05-01 10:00:01.230 BOND_STATE_CHANGED newState=11 deviceId=aa\n"
+                "05-01 10:00:02.450 BOND_STATE_CHANGED newState=12 deviceId=aa\n"
+                "05-01 10:00:06.000 auto reconnect trigger deviceId=aa\n"
+                "05-01 10:00:07.125 BLE physical connect success deviceId=aa\n"
+                "05-01 10:00:08.555 handle_rnlink_auth_success deviceId=aa\n"
+                "05-01 10:00:10.000 reconnectCurrentIfNeeded start deviceId=aa\n"
+                "05-01 10:00:11.250 BLEStatus:connected deviceId=aa\n"
+                "05-01 10:00:20.000 auto reconnect trigger deviceId=aa\n"
+                "05-01 10:00:25.500 native-auto-connect disable reason=auto_reconnect_timeout deviceId=aa\n"
+                "05-01 10:00:30.000 pairing start deviceId=aa\n"
+                "05-01 10:00:33.100 pairing success deviceId=bb\n",
+                encoding="utf-8",
+            )
+            data = read_connection_timings([str(source)], lambda *_: None)
+            self.assertFalse(data["errors"])
+            self.assertEqual(data["total"], 5)
+            missing, failed, ble, rnlink, pair = data["rows"]
+            self.assertEqual(missing["status"], "缺少结束日志")
+            self.assertIsNone(missing["end"])
+            for row, status, seconds, indexes in (
+                (failed, "失败／超时", 5.5, (8, 9)),
+                (ble, "到 BLE 连通", 1.25, (6, 7)),
+                (rnlink, "到 RNLink 鉴权", 2.555, (3, 5)),
+                (pair, "成功", 2.33, (0, 2)),
+            ):
+                with self.subTest(status=status):
+                    start, end = row["start"], row["end"]
+                    self.assertEqual((start["line"], end["line"]), indexes)
+                    self.assertEqual(row["status"], status)
+                    self.assertAlmostEqual(
+                        (end["time"] - start["time"]).total_seconds(), seconds
+                    )
+
+    def test_timing_marks_ambiguous_ends_without_inventing_durations(self):
+        with TemporaryDirectory() as folder:
+            source = Path(folder) / "connect.log"
+            lines = (
+                "2026-05-01 10:00:00.100 开始配对\n"
+                "2026-05-01 10:00:01.225 配对成功 deviceId=aa\n"
+            )
+            source.write_text(lines, encoding="utf-8")
+            result = read_connection_timings([str(source)], lambda *_: None)["rows"][0]
+            self.assertEqual(result["status"], "成功")
+            source.write_text(
+                lines + "2026-05-01 10:00:02.250 配对成功 deviceId=bb\n",
+                encoding="utf-8",
+            )
+            result = read_connection_timings([str(source)], lambda *_: None)["rows"][0]
+            self.assertEqual(result["status"], "缺少设备标识")
+            self.assertIsNone(result["end"])
+
+
 class ReviewUiTests(GuiCase):
     def load(self, *paths):
         self.win.start_preview([str(path) for path in paths], True)
         self.wait(lambda: not self.win._busy() and self.win.file_read_worker is None)
+
+    def test_connection_timings_is_independent_and_both_sources_are_navigable(self):
+        source = self.root / "pair.log"
+        source.write_text(
+            "2026-05-01 10:00:00.120 pairing start\n"
+            "2026-05-01 10:00:00.400 pairing success\n",
+            encoding="utf-8",
+        )
+        self.load(source)
+        self.win.show_connection_timings()
+        panel = self.win.connection_timings
+        panel.scan.click()
+        self.wait(lambda: not self.win._busy() and panel.model.rowCount() == 1)
+        self.assertIs(self.win.results.currentWidget(), panel)
+        self.assertFalse(self.win.has_analyzed)
+        self.assertEqual(panel.model.data(panel.model.index(0, 3)), "0.280 秒")
+        panel.table.activated.emit(panel.model.index(0, 5))
+        self.assertEqual(self.win.viewer.current_line_col()[0], 2)
+        panel.table.activated.emit(panel.model.index(0, 4))
+        self.assertEqual(self.win.viewer.current_line_col()[0], 1)
+        self.load(source)
+        self.assertEqual(panel.model.rowCount(), 0)
 
     def test_timeline_is_identical_in_viewer_copy_and_export(self):
         source = self.root / "combined.log"

@@ -2,6 +2,8 @@
 
 from pathlib import Path
 from collections import deque
+from datetime import datetime
+import re
 from .device_info import _path_time_hint, extract_device_info
 from .indexing import token_automaton
 from .ingestion import (
@@ -9,6 +11,33 @@ from .ingestion import (
     _is_glasses_metadata_only,
     scan_text_file,
 )
+from .timestamps import parse_log_time
+
+
+LOGCAT_TIME = re.compile(r"^\s*(\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d{1,6})?)")
+ISO_TRACE_TIME = re.compile(r"\b(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,6})?)")
+
+
+def trace_time_parser(path, fallback_year=None):
+    date_hint, _ = _path_time_hint(path)
+    year = date_hint.year if date_hint else fallback_year
+    if year is None:
+        year = datetime.fromtimestamp(Path(path).stat().st_mtime).year
+
+    def parse(line):
+        standard = parse_log_time(line)
+        if standard is not None:
+            return standard
+        iso = ISO_TRACE_TIME.search(line[:96])
+        short = LOGCAT_TIME.match(line) if iso is None else None
+        if iso is None and short is None:
+            return None
+        try:
+            return datetime.fromisoformat(iso[1] if iso else f"{year}-{short[1]}")
+        except ValueError:
+            return None
+
+    return parse
 
 
 METADATA_GROUPS = (

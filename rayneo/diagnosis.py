@@ -6,7 +6,6 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from statistics import median
 
-from .device_info import _path_time_hint
 from .diagnosis_timeline import LINK_MARKERS, LinkTimeline, diagnosis_report, note
 from .ingestion import _is_glasses_metadata_only, _is_glasses_side_path, scan_text_file
 from .indexing import required_regex_seeds
@@ -21,15 +20,28 @@ from .link_diagnostics import (
     NORMAL_NOTIFY,
     NOTIFY_FAILURE,
     NOTIFY_SCOPE,
+    _recovers,
     PAYLOAD,
     RECOVERY,
     _device,
 )
-from .log_scan import candidate_lines
+from .log_scan import candidate_lines, trace_time_parser
+from .notification_path import (
+    ANCS_DATA,
+    ANCS_SUBSCRIPTION,
+    FALSE_STATUS,
+    GLASSES_FAILURE,
+    GLASSES_OK,
+    GLASSES_RECEIVE,
+    GLASSES_RECEIVED,
+    GLASSES_SCOPE,
+    NOTIFICATION_MARKERS,
+    SUBSCRIBED,
+    NotificationLinks,
+)
 from .records import RSSI_RE
 from .rule_engine import _rule_trigger_match
 from .rules import _any_term_matches
-from .timestamps import parse_log_time
 
 
 CONTROLLER = re.compile(
@@ -101,9 +113,6 @@ LINK_RSSI = re.compile(
     r"\b(?:didReadRSSI|deviceRssi|bleRssi|BLE|Bluetooth|GATT|RNLink)\b",
     re.I,
 )
-LOGCAT_TIME = re.compile(r"^\s*(\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d{1,6})?)")
-ISO_TRACE_TIME = re.compile(r"\b(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,6})?)")
-
 MARKERS = (
     "hardware",
     "self-test",
@@ -152,13 +161,31 @@ MARKERS = (
 )
 
 DOWNSTREAM = {
-    "controller": {"weak_signal", "bond", "protocol", "spp", "ancs", "notification"},
-    "phone_bt": {"weak_signal", "bond", "protocol", "spp", "ancs", "notification"},
-    "app_crash": {"protocol", "ancs", "notification"},
-    "weak_signal": {"protocol", "spp", "ancs", "notification"},
-    "environment": {"weak_signal", "protocol", "spp", "ancs", "notification"},
-    "bond": {"protocol", "spp", "ancs", "notification"},
-    "ancs": {"notification"},
+    "controller": {"weak_signal", "bond", "protocol", "spp"},
+    "phone_bt": {"weak_signal", "bond", "protocol", "spp"},
+    "app_crash": {"protocol"},
+    "weak_signal": {"protocol", "spp"},
+    "environment": {"weak_signal", "protocol", "spp"},
+    "bond": {"protocol", "spp"},
+}
+
+NOTIFICATION_STAGES = {
+    "ancs_connect": ("ancs", 72, "ANCS 建链失败", "ANCS 建链失败。"),
+    "ancs_subscribe": ("ancs", 72, "ANCS 订阅失败", "ANCS 订阅失败。"),
+    "ancs_data": (
+        "ancs_data",
+        72,
+        "ANCS 通知数据失败",
+        "ANCS 通知数据读取或解析失败。",
+    ),
+    "forward": ("notification", 66, "手机通知转发失败", "手机通知转发失败。"),
+    "receive": (
+        "notification_receive",
+        78,
+        "眼镜接收或解析通知失败",
+        "眼镜接收或解析通知失败。",
+    ),
+    "display": ("notification_display", 79, "眼镜显示通知失败", "眼镜显示通知失败。"),
 }
 
 
@@ -178,36 +205,22 @@ def _new_link():
     return {"samples": deque(maxlen=48), "manual": None, "weak": None}
 
 
-def _trace_time(line, logcat_year):
-    standard = parse_log_time(line)
-    if standard is not None:
-        return standard
-    iso = ISO_TRACE_TIME.search(line[:96])
-    short = LOGCAT_TIME.match(line) if iso is None else None
-    if iso is None and short is None:
-        return None
-    try:
-        return datetime.fromisoformat(iso[1] if iso else f"{logcat_year}-{short[1]}")
-    except ValueError:
-        return None
-
-
 def scan_causes(
-    path, windows, disabled=(), prioritized=(), traces=None, locations=None
+    path,
+    windows,
+    disabled=(),
+    prioritized=(),
+    traces=None,
+    locations=None,
+    notification_links=None,
 ):
     is_glasses = _is_glasses_side_path(path)
     file_name = Path(path).name
-    date_hint, _ = _path_time_hint(path)
-    logcat_year = (
-        date_hint.year
-        if date_hint
-        else (
-            windows[0][0].year
-            if windows
-            else datetime.fromtimestamp(Path(path).stat().st_mtime).year
-        )
+    parse_time = trace_time_parser(path, windows[0][0].year if windows else None)
+    links = (
+        notification_links if notification_links is not None else NotificationLinks()
     )
-    markers = list(MARKERS)
+    markers = [*MARKERS, *NOTIFICATION_MARKERS]
     if traces is not None:
         markers.extend(LINK_MARKERS)
     full_scan = False
@@ -225,7 +238,7 @@ def scan_causes(
         found = {}
         points = {}
         lanes = OrderedDict()
-        notifications, ancs_failures = OrderedDict(), OrderedDict()
+        pending_notifications = OrderedDict()
         process = fatal = crash_time = None
         named = set()
         active_number, active_line = None, ""
@@ -285,6 +298,23 @@ def scan_causes(
                 if detailed:
                     points[point_key] = item
 
+        def add_notification(stage, anchor, raw):
+            if stage.startswith("ancs_") and "ANCS 建链或订阅失败" in disabled:
+                return
+            add(*NOTIFICATION_STAGES[stage], *anchor, raw=raw)
+
+        def record_notification(stage, device, message, number, time, line):
+            entry = (number, time, device), line[:180]
+            if message is None and stage not in {"ancs_connect", "ancs_subscribe"}:
+                add_notification(stage, *entry)
+                return
+            key = (stage, device, message)
+            pending_notifications[key] = entry
+            pending_notifications.move_to_end(key)
+            if len(pending_notifications) > 256:
+                (stage, _, _), entry = pending_notifications.popitem(last=False)
+                add_notification(stage, *entry)
+
         def crashed(label, number, time, raw=""):
             if BT_PROCESS.fullmatch(label) and not is_glasses:
                 add(
@@ -325,11 +355,13 @@ def scan_causes(
                 or MUTED_OR_REPLAY.search(line)
             ):
                 continue
-            time = _trace_time(line, logcat_year)
+            time = parse_time(line)
             active_number, active_line = number, line
             if time and "date/time:" in line.lower():
                 crash_time = time
             device = _device(line)
+            if time is not None:
+                links.observe(path, number, line, time, device)
             if link is not None:
                 link.observe(number, line, time, device)
             for rule in prioritized:
@@ -419,59 +451,75 @@ def scan_causes(
                 )
             ancs = ANCS_SCOPE.search(line)
             notify = NOTIFY_SCOPE.search(line)
-            if (ancs or notify) and not NORMAL_NOTIFY.search(line):
+            glasses_notify = GLASSES_SCOPE.search(line) or (is_glasses and notify)
+            if (
+                (ancs or notify or glasses_notify)
+                and not NORMAL_NOTIFY.search(line)
+                and in_scope(time)
+            ):
                 msg = MESSAGE_ID.search(line)
-                message_key = (device, msg[1]) if msg else None
-                if message_key and ACK.search(line) and not ACK_NEGATIVE.search(line):
-                    notifications.pop(message_key, None)
-                if ancs and RECOVERY["ANCS"].search(line):
-                    earlier = ancs_failures.get(device)
-                    if (
-                        earlier
-                        and time
-                        and earlier[0][1]
-                        and 0 <= (time - earlier[0][1]).total_seconds() <= 90
-                    ):
-                        ancs_failures.pop(device, None)
+                message = msg[1] if msg else None
+                if (
+                    message
+                    and not FALSE_STATUS.search(line)
+                    and not ACK_NEGATIVE.search(line)
+                    and not GLASSES_FAILURE.search(line)
+                ):
+                    if ACK.search(line) and not NOTIFY_FAILURE.search(line):
+                        pending_notifications.pop(("forward", device, message), None)
+                        pending_notifications.pop(("ancs_data", device, message), None)
+                    if glasses_notify and GLASSES_OK.search(line):
+                        pending_notifications.pop(("display", device, message), None)
+                    if glasses_notify and GLASSES_RECEIVED.search(line):
+                        pending_notifications.pop(("receive", device, message), None)
+                if ancs and not FALSE_STATUS.search(line):
+                    recovered = []
+                    if _recovers("ANCS", line):
+                        recovered.append("ancs_connect")
+                    if SUBSCRIBED.search(line):
+                        recovered.append("ancs_subscribe")
+                    for stage in recovered:
+                        key = (stage, device, None)
+                        earlier = pending_notifications.get(key)
+                        if (
+                            earlier
+                            and time
+                            and earlier[0][1]
+                            and 0 <= (time - earlier[0][1]).total_seconds() <= 90
+                        ):
+                            pending_notifications.pop(key)
                 if NOTIFY_PERMISSION.search(line):
                     add(
                         "notify_permission",
                         87,
                         "通知同步权限未就绪",
-                        "通知同步时，权限请求被拒绝。",
+                        "ANCS 返回鉴权或授权错误。"
+                        if ancs
+                        else "手机通知访问权限被拒绝。",
                         number,
                         time,
                         device,
                     )
                 elif ancs and ANCS_FAILURE.search(line):
-                    ancs_failures[device] = (number, time, device), line[:180]
-                    if len(ancs_failures) > 128:
-                        anchor, raw = ancs_failures.popitem(last=False)[1]
-                        add(
-                            "ancs",
-                            72,
-                            "ANCS 建链或订阅失败",
-                            "ANCS 操作失败。",
-                            *anchor,
-                            raw=raw,
-                        )
+                    if ANCS_DATA.search(line):
+                        stage = "ancs_data"
+                    elif ANCS_SUBSCRIPTION.search(line):
+                        stage = "ancs_subscribe"
+                    else:
+                        stage = "ancs_connect"
+                    record_notification(
+                        stage,
+                        device,
+                        message if stage == "ancs_data" else None,
+                        number,
+                        time,
+                        line,
+                    )
+                elif glasses_notify and GLASSES_FAILURE.search(line):
+                    stage = "receive" if GLASSES_RECEIVE.search(line) else "display"
+                    record_notification(stage, device, message, number, time, line)
                 elif notify and NOTIFY_FAILURE.search(line):
-                    if message_key:
-                        notifications[message_key] = (number, time, device), line[:180]
-                    if not message_key or len(notifications) > 256:
-                        anchor, raw = (
-                            notifications.popitem(last=False)[1]
-                            if message_key
-                            else ((number, time, device), line[:180])
-                        )
-                        add(
-                            "notification",
-                            66,
-                            "手机通知转发失败",
-                            "手机没能转发这条通知。",
-                            *anchor,
-                            raw=raw,
-                        )
+                    record_notification("forward", device, message, number, time, line)
 
             if time is None:
                 continue
@@ -573,24 +621,8 @@ def scan_causes(
                         )
                 lane["weak"] = None
 
-        for anchor, raw in notifications.values():
-            add(
-                "notification",
-                66,
-                "手机通知转发失败",
-                "手机没能转发这条通知。",
-                *anchor,
-                raw=raw,
-            )
-        for anchor, raw in ancs_failures.values():
-            add(
-                "ancs",
-                72,
-                "ANCS 建链或订阅失败",
-                "ANCS 操作失败。",
-                *anchor,
-                raw=raw,
-            )
+        for (stage, _, _), entry in pending_notifications.items():
+            add_notification(stage, *entry)
         if len(named) > 1:
             for code in ("weak_signal", "environment"):
                 if code in found and not found[code]["device_id"]:
@@ -609,6 +641,8 @@ def scan_causes(
         )
 
     items, trace, points = scan_text_file(path, scan) or ([], None, [])
+    if notification_links is None:
+        links.associate(items, points)
     if trace and traces is not None:
         traces.append(trace)
     if locations is not None:
@@ -618,7 +652,9 @@ def scan_causes(
 
 def select_causes(candidates):
     selected = []
-    for item in sorted(
+    selected_roots = set()
+    related = {}
+    ordered = sorted(
         candidates,
         key=lambda x: (
             -x["priority"],
@@ -626,7 +662,15 @@ def select_causes(candidates):
             x["full_path"],
             x["line"],
         ),
-    ):
+    )
+    available = {(item["full_path"], item["line"], item["rule_id"]) for item in ordered}
+    for item in ordered:
+        upstream = item.get("upstream")
+        if upstream in available:
+            related.setdefault(upstream, item)
+    for item in ordered:
+        if item.get("upstream") in selected_roots:
+            continue
         code = item["rule_id"]
         for stronger in selected:
             a, b = stronger["time"], item["time"]
@@ -647,7 +691,11 @@ def select_causes(candidates):
             ):
                 break
         else:
-            selected.append(item)
+            key = item["full_path"], item["line"], code
+            linked = related.get(key)
+            if linked:
+                selected_roots.add(key)
+            selected.append({**item, "steps": linked["steps"]} if linked else item)
         if len(selected) == 2:
             break
     return selected
@@ -656,6 +704,7 @@ def select_causes(candidates):
 def diagnose(paths, windows, disabled, progress, external_rules=(), *, locations=None):
     candidates, errors = [], []
     traces = []
+    links = NotificationLinks()
     prioritized = [
         rule
         for rule in external_rules
@@ -668,11 +717,16 @@ def diagnose(paths, windows, disabled, progress, external_rules=(), *, locations
         progress(idx, len(paths), Path(path).name)
         try:
             candidates.extend(
-                scan_causes(path, windows, disabled, prioritized, traces, locations)
+                scan_causes(
+                    path, windows, disabled, prioritized, traces, locations, links
+                )
             )
         except OSError as exc:
             errors.append(f"{Path(path).name}：{exc}")
-    selected = select_causes(candidates)
+    links.associate(candidates, locations or ())
+    # Include a later notification incident when it can be tied to an upstream failure.
+    attached = [item for item in (locations or ()) if item.get("upstream")]
+    selected = select_causes([*candidates, *attached])
     link_trace = (
         None
         if selected

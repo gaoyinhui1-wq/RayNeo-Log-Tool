@@ -59,7 +59,10 @@ def run_checks():
             source.write_text(
                 "2026-01-01 09:59:59 [App] appVersion=1.2.3, sdkVersion=4.5.6, androidVersion=15\n"
                 "2026-01-01 10:00:00 [System] Bluetooth stack crashed\n"
-                "2026-01-01 10:00:01 [INFO] disconnect then DISCONNECT\n",
+                "2026-01-01 10:00:00.500 ANCS subscribe failed\n"
+                "2026-01-01 10:00:01 [INFO] disconnect then DISCONNECT\n"
+                "2026-01-01 10:01:00.100 auto reconnect trigger deviceId=test\n"
+                "2026-01-01 10:01:01.250 BLE physical connect success deviceId=test\n",
                 encoding="utf-8",
             )
             # Error dialogs must not block an unattended CI runner.
@@ -78,6 +81,7 @@ def run_checks():
                 wait_for(lambda: not window._busy() and window.file_read_worker is None)
                 assert window.has_analyzed and window.incidents
                 assert window.incidents[0]["rule_id"] == "phone_bt"
+                assert "ANCS 订阅失败" in window.txt_analysis.toPlainText()
                 assert window.last_analysis_metadata["process_token"] != os.getpid()
                 checks.append("background diagnosis and concise report")
                 window.search_input.setText("disconnect")
@@ -94,6 +98,14 @@ def run_checks():
                 window.match_clicked(window.match_model.index(0, 2))
                 window.viewer.copy()
                 assert app.clipboard().text() == "disconnect"
+                window.show_connection_timings()
+                timing = window.connection_timings
+                timing.scan.click()
+                wait_for(lambda: not window._busy() and timing.model.rowCount() == 1)
+                assert timing.model.data(timing.model.index(0, 3)) == "1.150 秒"
+                timing.table.activated.emit(timing.model.index(0, 5))
+                assert window.viewer.current_line_col()[0] == 6
+                checks.append("pairing and reconnect timing with source navigation")
                 assert not window.grab().isNull()
                 checks.extend(
                     ["filter hit metadata", "navigation and clipboard", "Qt rendering"]

@@ -53,7 +53,7 @@ from .matching import SearchSpec
 from .filter_results import DiskMatchRows
 from .filter_history import FilterHistoryButton
 from .notes import NotesDock
-from .panels import DeviceInfoPanel, SearchDock
+from .panels import ConnectionTimingPanel, DeviceInfoPanel, SearchDock
 from .large_log import PAGE_LINES
 from .result_delegate import MatchHighlightDelegate
 from .viewer import VirtualLogViewer, VSCodeReportHighlighter
@@ -217,6 +217,7 @@ class AppWindow(QMainWindow):
         )
         self.action(m_tool, "编辑异常判定规则...", None, self.open_rule_editor)
         self.action_analyze = self.action(m_tool, "开始分析", "F5", self.reanalyze)
+        self.action(m_tool, "配对／回连耗时", None, self.show_connection_timings)
         self.action(m_tool, "复制分析报告", None, self.copy_analysis)
 
         base = QWidget(self)
@@ -569,6 +570,10 @@ class AppWindow(QMainWindow):
         self.tbl_matches.horizontalHeader().setStretchLastSection(True)
         self.tbl_matches.doubleClicked.connect(self.match_clicked)
         self.results.addTab(self.tbl_matches, "筛选结果 (0)")
+        self.connection_timings = ConnectionTimingPanel(self.results)
+        self.connection_timings.scan_requested.connect(self.start_connection_timings)
+        self.connection_timings.jump_requested.connect(self.goto)
+        self.results.addTab(self.connection_timings, "配对／回连耗时")
         navigation = QWidget()
         match_navigation = QHBoxLayout(navigation)
         match_navigation.setContentsMargins(1, 0, 3, 0)
@@ -787,6 +792,9 @@ class AppWindow(QMainWindow):
         if record_module is not None:
             record_module.clear_record_cache()
         self.file_list_data = sorted(files, key=lambda p: os.path.basename(p).lower())
+        self.connection_timings.reset(
+            any(path not in self._auxiliary_paths for path in files)
+        )
         self._file_incident_counts = {}
         self.raw_data = OrderedDict()
         self._line_index_cache.clear()
@@ -1223,6 +1231,7 @@ class AppWindow(QMainWindow):
         self._report_file = None
         self._report_truncated = False
         self.txt_analysis.setPlainText("日志已保存。按 F5 重新分析。")
+        self.connection_timings.reset(True)
         if hasattr(self, "_report_dialog"):
             self._report_dialog.hide()
         self.incidents = []
@@ -1273,6 +1282,46 @@ class AppWindow(QMainWindow):
         self.start_analysis(
             self.last_open_paths, self.last_is_file_list, self.prepared_payload
         )
+
+    def show_connection_timings(self):
+        self.results.show()
+        self.results.setCurrentWidget(self.connection_timings)
+
+    def start_connection_timings(self):
+        if self._busy():
+            self.statusBar().showMessage("当前打开或分析任务尚未结束")
+            return
+        paths = [
+            path
+            for path in self.file_list_data
+            if path not in self._auxiliary_paths and path not in self._binary_paths
+        ]
+        if not paths:
+            self.connection_timings.message("当前没有可计算的文本日志")
+            return
+        from .job_process import AnalysisProcess
+
+        self.show_connection_timings()
+        self.connection_timings.scan.setEnabled(False)
+        self.connection_timings.message("正在扫描日志…")
+        self.progress.show()
+        self.analysis_progress(0, "正在计算配对／回连耗时…")
+        self.worker = AnalysisProcess(
+            self._analysis_session, {"operation": "connection_timings", "paths": paths}
+        )
+        self.worker.progress.connect(self.analysis_progress)
+        self.worker.finished.connect(self.connection_timings_done)
+        self._analysis_pending = True
+        self.btn_cancel.setEnabled(True)
+        self.worker.start()
+
+    def connection_timings_done(self, data):
+        self._analysis_pending = False
+        self._refresh_cancel_state()
+        self.progress.hide()
+        self.connection_timings.show_result(data)
+        self.lbl_status.setText(self.connection_timings.status.text())
+        self.statusBar().showMessage(self.connection_timings.status.text())
 
     def start_analysis(self, paths, is_file_list, prepared=None):
         if self._busy():
@@ -1357,6 +1406,9 @@ class AppWindow(QMainWindow):
         selected_path = self.current_file
         if refresh_files:
             self.clear_filter_results()
+            self.connection_timings.reset(
+                any(path not in self._auxiliary_paths for path in files)
+            )
             self._input_generation += 1
             self._pending_selected_path = self._pending_goto = None
             self.raw_data = OrderedDict()
@@ -1406,7 +1458,10 @@ class AppWindow(QMainWindow):
         keep_filter = self.results.currentIndex() == 2 and (
             self.match_model.search_spec is not None or not self.btn_filter.isEnabled()
         )
-        if not keep_filter:
+        if (
+            not keep_filter
+            and self.results.currentWidget() is not self.connection_timings
+        ):
             self.results.setCurrentIndex(0)
             self.results.show()
         if self.current_file is None and self.file_list_data:

@@ -335,6 +335,20 @@ def serve(directory):
                 from .log_scan import read_versions
 
                 send("result", data={"device_info": read_versions(request["paths"])})
+            elif operation == "connection_timings":
+                from .connection_timing import read_connection_timings
+
+                def timing_progress(index, count, name):
+                    send(
+                        "progress",
+                        value=10 + int(85 * index / count),
+                        message=f"计算耗时 {name}（{index + 1}/{count}）",
+                    )
+
+                send(
+                    "result",
+                    data=read_connection_timings(request["paths"], timing_progress),
+                )
             elif operation == "diagnose":
                 from . import rules
                 from .diagnosis import analysis_windows, diagnose, diagnosis_report
