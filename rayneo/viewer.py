@@ -145,7 +145,7 @@ class VSCodeReportHighlighter(QSyntaxHighlighter):
             return
         if text.startswith("分析范围："):
             self.setFormat(0, len(text), self.scope)
-        elif text in ("设备信息", "分析结果与日志证据"):
+        elif text in ("设备信息", "分析结果与日志证据", "配对／回连过程"):
             self.setFormat(0, len(text), self.section)
         elif self._number_heading.match(text):
             self.setFormat(0, len(text), self.heading)

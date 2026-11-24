@@ -6,6 +6,12 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from statistics import median
 
+from .connection_timing import (
+    ConnectionAttempts,
+    PAIR_ENCRYPTION_FAILURE,
+    TIMING_CONTEXT,
+    TIMING_MARKERS,
+)
 from .diagnosis_timeline import LINK_MARKERS, LinkTimeline, diagnosis_report, note
 from .ingestion import _is_glasses_metadata_only, _is_glasses_side_path, scan_text_file
 from .indexing import required_regex_seeds
@@ -82,11 +88,6 @@ BT_PROCESS = re.compile(
 )
 VERSION_EXCHANGE = re.compile(
     r"\bsendMsg exchange version time out\b|眼镜回复版本交换信息超时",
-    re.I,
-)
-BOND_FAILURE = re.compile(
-    r"\bCBErrorDomain\s+Code\s*=\s*15\b.{0,90}failed to encrypt"
-    r"|\bcan't find enc key\b|\bfind_remote_device\b.{0,100}found null addr",
     re.I,
 )
 SSP_FAILURE = re.compile(
@@ -213,6 +214,7 @@ def scan_causes(
     traces=None,
     locations=None,
     notification_links=None,
+    timing_rows=None,
 ):
     is_glasses = _is_glasses_side_path(path)
     file_name = Path(path).name
@@ -223,6 +225,8 @@ def scan_causes(
     markers = [*MARKERS, *NOTIFICATION_MARKERS]
     if traces is not None:
         markers.extend(LINK_MARKERS)
+    if timing_rows is not None:
+        markers.extend(TIMING_MARKERS)
     full_scan = False
     for rule in prioritized:
         for term in rule["异常日志"]:
@@ -249,6 +253,11 @@ def scan_causes(
             )
 
         link = LinkTimeline(path, in_scope) if traces is not None else None
+        timings = (
+            ConnectionAttempts(path, capacity=8, windows=windows)
+            if timing_rows is not None
+            else None
+        )
 
         def add(
             code,
@@ -360,6 +369,8 @@ def scan_causes(
             if time and "date/time:" in line.lower():
                 crash_time = time
             device = _device(line)
+            if timings is not None and time is not None and TIMING_CONTEXT.search(line):
+                timings.observe(number, line, time, device)
             if time is not None:
                 links.observe(path, number, line, time, device)
             if link is not None:
@@ -419,7 +430,7 @@ def scan_causes(
                 elif process and number - process[1] <= 80:
                     crashed(process[0], number, time or crash_time)
 
-            if BOND_FAILURE.search(line):
+            if PAIR_ENCRYPTION_FAILURE.search(line):
                 add(
                     "bond",
                     82,
@@ -638,9 +649,12 @@ def scan_causes(
             list(found.values()),
             link.result(len(named) > 1) if link else None,
             list(points.values()),
+            timings.finish()[0] if timings is not None else [],
         )
 
-    items, trace, points = scan_text_file(path, scan) or ([], None, [])
+    items, trace, points, attempts = scan_text_file(path, scan) or ([], None, [], [])
+    if timing_rows is not None:
+        timing_rows.extend(attempts)
     if notification_links is None:
         links.associate(items, points)
     if trace and traces is not None:
@@ -701,7 +715,16 @@ def select_causes(candidates):
     return selected
 
 
-def diagnose(paths, windows, disabled, progress, external_rules=(), *, locations=None):
+def diagnose(
+    paths,
+    windows,
+    disabled,
+    progress,
+    external_rules=(),
+    *,
+    locations=None,
+    timing_rows=None,
+):
     candidates, errors = [], []
     traces = []
     links = NotificationLinks()
@@ -718,7 +741,14 @@ def diagnose(paths, windows, disabled, progress, external_rules=(), *, locations
         try:
             candidates.extend(
                 scan_causes(
-                    path, windows, disabled, prioritized, traces, locations, links
+                    path,
+                    windows,
+                    disabled,
+                    prioritized,
+                    traces,
+                    locations,
+                    links,
+                    timing_rows,
                 )
             )
         except OSError as exc:

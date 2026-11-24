@@ -8,10 +8,11 @@ from unittest.mock import patch
 
 from PyQt6.QtCore import QSettings, QTimer
 from PyQt6.QtGui import QTextCursor
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QTableWidget
 
 from gui_support import GuiCase
-from rayneo.connection_timing import read_connection_timings
+from rayneo.bluetooth_samples import read_bluetooth_samples
+from rayneo.connection_timing import duration_text, read_connection_timings
 from rayneo.diagnosis import diagnose, diagnosis_report, scan_causes, select_causes
 from rayneo.ingestion import VLOG_AAD, VLOG_DEFAULT_KEY_BASE64, VLOG_MAGIC
 from rayneo.log_edit import LogEditDialog
@@ -188,6 +189,22 @@ class FocusedDiagnosisTests(TestCase):
 
 
 class ConnectionTimingTests(TestCase):
+    def test_discovery_before_reconnect_trigger_remains_context_only(self):
+        with TemporaryDirectory() as folder:
+            source = Path(folder) / "connect.log"
+            source.write_text(
+                "2026-05-01 10:00:00.001 BLE scan start\n"
+                "2026-05-01 10:00:01.100 发现设备: RayNeo iO-TEST deviceId=aa\n"
+                "2026-05-01 10:00:01.210 auto reconnect trigger deviceId=aa\n"
+                "2026-05-01 10:00:02.501 BLE physical connect success deviceId=aa\n",
+                encoding="utf-8",
+            )
+            data = read_connection_timings([str(source)], lambda *_: None)
+            row = data["rows"][0]
+            self.assertEqual([step["line"] for step in row["steps"]], [0, 1, 2, 3])
+            self.assertEqual(row["start"]["line"], 2)
+            self.assertEqual(duration_text(row["start"], row["end"]), "1.291 秒")
+
     def test_timing_gives_each_attempt_a_real_endpoint_and_keeps_unknowns_open(self):
         with TemporaryDirectory() as folder:
             source = Path(folder) / "logcat_2026-05-01.log"
@@ -245,6 +262,62 @@ class ConnectionTimingTests(TestCase):
             self.assertIsNone(result["end"])
 
 
+class BluetoothSampleTests(TestCase):
+    def test_samples_take_real_link_values_and_ignore_wifi_and_failed_rssi(self):
+        with TemporaryDirectory() as folder:
+            source = Path(folder) / "native_ios_2026_05_01.log"
+            source.write_text(
+                "2026-05-01 08:00:00.123456 RayneoNet-v1.4.1 |peripheral(_:didReadRSSI:error:) | didReadRSSI: -29, name: Ra******02, error: nil\n"
+                "2026-05-01 08:00:01 BLE deviceRssi=-81 deviceId=aa\n"
+                "2026-05-01 08:00:02 RayneoNet-v1.4.1 Wifi RSSI=-25\n"
+                "2026-05-01 08:00:03 didReadRSSI: -99, error: CBErrorDomain\n"
+                "2026-05-01 08:00:04 didReadRSSI: 127, error: nil\n"
+                "2026-05-01 08:00:05 [ChannelRate] device=cd******ff ch=BLE dir=TX current=0.01 KB/s avg=0.03 KB/s total=1.21 KB\n"
+                "2026-05-01 08:00:06 [ChannelRate] device=cd******ff ch=BLE dir=RX current=88 B/s avg=1 KiB/s total=2048 B\n"
+                "2026-05-01 08:00:07 [ChannelRate] device=cd******ff ch=WiFi dir=RX current=8 MB/s\n",
+                encoding="utf-8",
+            )
+            result = read_bluetooth_samples([str(source)], lambda *_: None)
+            self.assertEqual(result["counts"], {"signal": 2, "rate": 2})
+            self.assertIn("均值 -55.0 dBm", result["summary"]["signal"])
+            signal = result["rows"]["signal"][-1]
+            self.assertEqual(signal[0], "2026-05-01 08:00:00.123456")
+            self.assertEqual(signal[3], ("Ra******02", -29))
+            tx = result["rows"]["rate"][-1]
+            self.assertEqual(
+                tx[3], ("cd******ff", "BLE", "TX", "0.01 KB/s", "0.03 KB/s", "1.21 KB")
+            )
+            self.assertEqual(result["rows"]["rate"][0][3][3:5], ("88 B/s", "1 KiB/s"))
+
+    def test_mirrored_messages_require_glasses_evidence_and_keep_payload_by_id(self):
+        with TemporaryDirectory() as folder:
+            glasses, phone = Path(folder) / "syslog.0.txt", Path(folder) / "phone.log"
+            phone.write_text(
+                "2026-05-01 08:00:00 ANCS subscribed successfully\n"
+                '2026-05-01 08:00:01 NotificationSync delivered notificationId=21 title="Only phone sent"\n'
+                '2026-05-01 08:00:02 NotificationSync received by glasses notificationId=22 title="Receipt"\n',
+                encoding="utf-8",
+            )
+            glasses.write_text(
+                '2026-05-01 08:01:00 ANCS message NotificationUID=0x1a deviceId=aa appIdentifier=com.demo title="测试, 消息" message="Pay: 1,2"\n'
+                "2026-05-01 08:01:01 ANCS GlassesNotification displayed NotificationUID=0x1a deviceId=aa\n"
+                "2026-05-01 08:01:02 ANCS GlassesNotification received NotificationUID=0x1a deviceId=bb\n"
+                "2026-05-01 08:01:03 GlassesNotification display failed notificationId=99 message=displayed\n"
+                "2026-05-01 08:01:04 GlassesNotification suppressed DND notificationId=100\n",
+                encoding="utf-8",
+            )
+            result = read_bluetooth_samples([str(phone), str(glasses)], lambda *_: None)
+            rows = result["rows"]["mirrored"]
+            self.assertEqual(result["counts"]["mirrored"], 3)
+            self.assertEqual(rows[0][3], ("眼镜已接收", "ANCS", "0x1a", "", "", ""))
+            self.assertEqual(rows[1][2], 1)
+            self.assertEqual(
+                rows[1][3],
+                ("已上镜", "ANCS", "0x1a", "com.demo", "测试, 消息", "Pay: 1,2"),
+            )
+            self.assertEqual(rows[2][3][0], "眼镜已接收")
+
+
 class ReviewUiTests(GuiCase):
     def load(self, *paths):
         self.win.start_preview([str(path) for path in paths], True)
@@ -279,6 +352,76 @@ class ReviewUiTests(GuiCase):
         self.assertEqual(self.win.vsplit.sizes()[1], previous_height)
         self.load(source)
         self.assertEqual(panel.model.rowCount(), 0)
+
+    def test_process_shows_exact_intervals_in_timing_and_analysis(self):
+        source = self.root / "reconnect.log"
+        source.write_text(
+            "2026-05-01 10:00:00.120005 auto reconnect trigger deviceId=aa\n"
+            "2026-05-01 10:00:00.220010 BLE scan start deviceId=aa\n"
+            "2026-05-01 10:00:00.455050 发现设备: RayNeo iO-ABCD deviceId=aa\n"
+            "2026-05-01 10:00:00.505000 connectGatt deviceId=aa\n"
+            "2026-05-01 10:00:01.000000 BLE physical connect success deviceId=aa\n"
+            "2026-05-01 10:00:01.250500 RNLink auth start deviceId=aa\n"
+            "2026-05-01 10:00:02.325010 handle_rnlink_auth_success deviceId=aa\n"
+            "2026-05-01 10:00:02.425020 auto reconnect success deviceId=aa\n",
+            encoding="utf-8",
+        )
+        self.load(source)
+        self.win.show_connection_timings()
+        panel = self.win.connection_timings
+        panel.scan.click()
+        self.wait(lambda: not self.win._busy() and panel.model.rowCount() == 1)
+        row = panel.model.rows[0]
+        self.assertEqual(duration_text(row["start"], row["end"]), "2.305015 秒")
+        self.assertEqual([step["line"] for step in row["steps"]], list(range(8)))
+        panel.table.setCurrentIndex(panel.model.index(0, 0))
+        panel.steps.click()
+        table = panel._process_dialog.findChild(QTableWidget)
+        self.assertEqual(table.item(1, 2).text(), "0.100005 秒")
+        table.cellDoubleClicked.emit(4, 0)
+        self.assertEqual(self.win.viewer.current_line_col()[0], 5)
+        panel._process_dialog.close()
+        self.win.reanalyze()
+        self.wait(lambda: not self.win._busy() and self.win.has_analyzed)
+        report = self.win.txt_analysis.toPlainText()
+        self.assertIn("配对／回连过程", report)
+        self.assertIn("RNLink 鉴权完成（+1.074510 秒）", report)
+        self.assertIn("成功，共 2.305015 秒", report)
+
+    def test_sample_tabs_load_in_one_job_and_navigate_then_clear_on_new_input(self):
+        source = self.root / "system.log"
+        source.write_text(
+            "2026-05-01 08:00:00 BLE RSSI=-55\n"
+            "2026-05-01 08:00:01 [ChannelRate] ch=BLE dir=RX current=8 KB/s\n"
+            '2026-05-01 08:00:02 ANCS GlassesNotification displayed notificationId=12 message="好"\n',
+            encoding="utf-8",
+        )
+        self.load(source)
+        panels = self.win.sample_panels
+        self.assertEqual(
+            [
+                self.win.results.tabText(self.win.results.indexOf(panel))
+                for panel in panels.values()
+            ],
+            ["信号强度", "蓝牙速率", "上镜消息"],
+        )
+        self.win.results.setCurrentWidget(panels["signal"])
+        panels["signal"].scan.click()
+        self.wait(
+            lambda: (
+                not self.win._busy()
+                and all(panel.model.rowCount() == 1 for panel in panels.values())
+            )
+        )
+        self.assertFalse(self.win.has_analyzed)
+        self.win.results.setCurrentWidget(panels["mirrored"])
+        msg = panels["mirrored"]
+        self.assertEqual(msg.model.data(msg.model.index(0, 6)), "好")
+        self.assertGreaterEqual(msg.table.viewport().height(), msg.table.rowHeight(0))
+        msg.table.activated.emit(msg.model.index(0, 6))
+        self.assertEqual(self.win.viewer.current_line_col()[0], 3)
+        self.load(source)
+        self.assertTrue(all(panel.model.rowCount() == 0 for panel in panels.values()))
 
     def test_timeline_is_identical_in_viewer_copy_and_export(self):
         source = self.root / "combined.log"

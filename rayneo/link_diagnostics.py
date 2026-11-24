@@ -70,7 +70,7 @@ NORMAL_NOTIFY = re.compile(
     re.I,
 )
 MESSAGE_ID = re.compile(
-    r"""\b(?:notificationId|notification_id|notifId|messageId|uid)["']?\s*[:=]\s*["']?([\w-]+)""",
+    r"""\b(?:notificationId|notification_id|notificationUid|notification_uid|notifId|messageId|message_id|uid)["']?\s*[:=]\s*["']?([\w-]+)""",
     re.I,
 )
 ACK = re.compile(

@@ -335,23 +335,30 @@ def serve(directory):
                 from .log_scan import read_versions
 
                 send("result", data={"device_info": read_versions(request["paths"])})
-            elif operation == "connection_timings":
-                from .connection_timing import read_connection_timings
+            elif operation in {"connection_timings", "bluetooth_samples"}:
+                if operation == "connection_timings":
+                    from .connection_timing import read_connection_timings as read
+                else:
+                    from .bluetooth_samples import read_bluetooth_samples as read
 
-                def timing_progress(index, count, name):
-                    send(
-                        "progress",
-                        value=10 + int(85 * index / count),
-                        message=f"计算耗时 {name}（{index + 1}/{count}）",
-                    )
+                last_progress = 0.0
 
-                send(
-                    "result",
-                    data=read_connection_timings(request["paths"], timing_progress),
-                )
+                def report_progress(index, count, name):
+                    nonlocal last_progress
+                    now = time.monotonic()
+                    if now - last_progress >= 0.15:
+                        last_progress = now
+                        send(
+                            "progress",
+                            value=10 + int(85 * index / count),
+                            message=f"扫描 {name}（{index + 1}/{count}）",
+                        )
+
+                send("result", data=read(request["paths"], report_progress))
             elif operation == "diagnose":
                 from . import rules
                 from .diagnosis import analysis_windows, diagnose, diagnosis_report
+                from .connection_timing import connection_process_text
                 from .text import file_revision
 
                 started = time.monotonic()
@@ -401,6 +408,7 @@ def serve(directory):
                             last_update = now
 
                     locations = []
+                    timing_rows = []
                     conclusions, errors, trace = diagnose(
                         log_paths,
                         windows,
@@ -408,25 +416,28 @@ def serve(directory):
                         progress,
                         rules.EXTERNAL_RULES,
                         locations=locations,
+                        timing_rows=timing_rows,
                     )
-                    cached = conclusions, locations, errors, trace
+                    cached = conclusions, locations, errors, trace, timing_rows
                     if len(diagnosis_cache) >= 8:
                         diagnosis_cache.pop(next(iter(diagnosis_cache)))
                     diagnosis_cache[key] = cached
                     reused = False
                 else:
                     reused = True
-                conclusions, locations, errors, link_trace = cached
+                conclusions, locations, errors, link_trace, timing_rows = cached
                 devices = request.get("device_info") or {}
+                report = diagnosis_report(conclusions, devices, errors, link_trace)
+                process = connection_process_text(timing_rows, conclusions)
+                if process:
+                    report = report + "\n\n" + process
                 send(
                     "result",
                     data={
                         "source_changed": changed,
                         "file_paths": paths,
                         "analyzed_file_count": len(log_paths),
-                        "report_text": diagnosis_report(
-                            conclusions, devices, errors, link_trace
-                        ),
+                        "report_text": report,
                         "incidents": locations,
                         "device_info": devices,
                         "analysis_errors": errors,

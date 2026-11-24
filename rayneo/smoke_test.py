@@ -62,7 +62,10 @@ def run_checks():
                 "2026-01-01 10:00:00.500 ANCS subscribe failed\n"
                 "2026-01-01 10:00:01 [INFO] disconnect then DISCONNECT\n"
                 "2026-01-01 10:01:00.100 auto reconnect trigger deviceId=test\n"
-                "2026-01-01 10:01:01.250 BLE physical connect success deviceId=test\n",
+                "2026-01-01 10:01:01.250 BLE physical connect success deviceId=test\n"
+                "2026-01-01 10:01:02.500 BLE RSSI=-51 deviceId=test\n"
+                "2026-01-01 10:01:03 [ChannelRate] device=test ch=BLE dir=RX current=0.01 KB/s avg=0.02 KB/s\n"
+                '2026-01-01 10:01:04 ANCS GlassesNotification displayed notificationId=12 message="通知已显示"\n',
                 encoding="utf-8",
             )
             # Error dialogs must not block an unattended CI runner.
@@ -82,6 +85,7 @@ def run_checks():
                 assert window.has_analyzed and window.incidents
                 assert window.incidents[0]["rule_id"] == "phone_bt"
                 assert "ANCS 订阅失败" in window.txt_analysis.toPlainText()
+                assert "配对／回连过程" in window.txt_analysis.toPlainText()
                 assert window.last_analysis_metadata["process_token"] != os.getpid()
                 checks.append("background diagnosis and concise report")
                 window.search_input.setText("disconnect")
@@ -106,6 +110,21 @@ def run_checks():
                 timing.table.activated.emit(timing.model.index(0, 5))
                 assert window.viewer.current_line_col()[0] == 6
                 checks.append("pairing and reconnect timing with source navigation")
+                sample_pages = window.sample_panels
+                window.results.setCurrentWidget(sample_pages["signal"])
+                sample_pages["signal"].scan.click()
+                wait_for(
+                    lambda: (
+                        not window._busy()
+                        and all(
+                            page.model.rowCount() == 1 for page in sample_pages.values()
+                        )
+                    )
+                )
+                assert sample_pages["signal"].model.rows[0][3][1] == -51
+                assert sample_pages["rate"].model.rows[0][3][3] == "0.01 KB/s"
+                assert sample_pages["mirrored"].model.rows[0][3][-1] == "通知已显示"
+                checks.append("RSSI, ChannelRate, and mirrored ANCS pages")
                 assert not window.grab().isNull()
                 checks.extend(
                     ["filter hit metadata", "navigation and clipboard", "Qt rendering"]

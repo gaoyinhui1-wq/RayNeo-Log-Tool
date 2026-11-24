@@ -1,11 +1,13 @@
 """Nonmodal search and result docks; closing a floating search docks it again."""
 
+from html import escape
 from math import ceil
 from pathlib import Path
 
 from PyQt6.QtCore import QAbstractTableModel, QModelIndex, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QDialog,
     QDockWidget,
     QFrame,
     QHBoxLayout,
@@ -14,11 +16,14 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QTableView,
+    QTableWidget,
+    QTableWidgetItem,
     QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
+from .connection_timing import duration_text, event_time_text
 from .device_info import device_summary_lines
 from .viewer import VSCodeReportHighlighter
 
@@ -59,12 +64,12 @@ class ConnectionTimingModel(QAbstractTableModel):
             event = start if column == 4 else end
             if event is None:
                 return "—" if role == Qt.ItemDataRole.DisplayRole else None
-            timestamp = event["time"].isoformat(sep=" ", timespec="milliseconds")
+            timestamp = event_time_text(event, full=True)
             position = f"{Path(event['path']).name}:{event['line'] + 1}"
             if role == Qt.ItemDataRole.DisplayRole:
                 return f"{timestamp}  {position}"
             if role == Qt.ItemDataRole.ToolTipRole:
-                return f"{timestamp}  {position}\n{event['raw']}"
+                return f"<pre>{escape(timestamp)}  {escape(position)}\n{escape(event['raw'])}</pre>"
         elif role == Qt.ItemDataRole.DisplayRole:
             if column == 0:
                 return "配对" if row["kind"] == "pair" else "回连"
@@ -73,11 +78,7 @@ class ConnectionTimingModel(QAbstractTableModel):
             if column == 2:
                 return row["status"]
             if column == 3:
-                return (
-                    f"{(end['time'] - start['time']).total_seconds():.3f} 秒"
-                    if end
-                    else "—"
-                )
+                return duration_text(start, end) if end else "—"
         return None
 
 
@@ -93,11 +94,16 @@ class ConnectionTimingPanel(QWidget):
         controls = QHBoxLayout()
         controls.setContentsMargins(4, 2, 4, 2)
         self.scan = QPushButton("计算耗时")
+        self.steps = QPushButton("查看过程")
+        self.steps.setEnabled(False)
+        self.steps.clicked.connect(self.show_process)
+        self._process_dialog = None
         self.status = QLabel()
         self.status.setSizePolicy(
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
         )
         controls.addWidget(self.scan)
+        controls.addWidget(self.steps)
         controls.addWidget(self.status, 1)
         layout.addLayout(controls)
 
@@ -109,6 +115,9 @@ class ConnectionTimingPanel(QWidget):
         self.table.setWordWrap(False)
         self.model = ConnectionTimingModel(self.table)
         self.table.setModel(self.model)
+        self.table.selectionModel().currentChanged.connect(
+            lambda index, _: self.steps.setEnabled(index.isValid())
+        )
         for column, width in enumerate((77, 122, 130, 80, 235, 235)):
             self.table.setColumnWidth(column, width)
         self.table.horizontalHeader().setStretchLastSection(True)
@@ -123,12 +132,66 @@ class ConnectionTimingPanel(QWidget):
         if event is not None:
             self.jump_requested.emit(event["path"], event["line"])
 
+    def show_process(self):
+        index = self.table.currentIndex()
+        if not index.isValid():
+            return
+        if self._process_dialog is not None:
+            self._process_dialog.close()
+        attempt = self.model.rows[index.row()]
+        events, start = attempt["steps"], attempt["start"]
+        dialog = QDialog(self, Qt.WindowType.Tool)
+        self._process_dialog = dialog
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dialog.finished.connect(lambda _: setattr(self, "_process_dialog", None))
+        dialog.setWindowTitle("配对／回连过程")
+        dialog.resize(800, 310)
+        layout = QVBoxLayout(dialog)
+        table = QTableWidget(len(events), 5)
+        table.setHorizontalHeaderLabels(
+            ("步骤", "日志时间", "距上一步", "从起点", "原文位置")
+        )
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.verticalHeader().setVisible(False)
+        table.horizontalHeader().setStretchLastSection(True)
+        for col, width in enumerate((144, 206, 105, 105)):
+            table.setColumnWidth(col, width)
+        for row, event in enumerate(events):
+            since_previous = duration_text(events[row - 1], event) if row else "—"
+            since_start = (
+                duration_text(start, event) if event["line"] > start["line"] else "—"
+            )
+            path = f"{Path(event['path']).name}:{event['line'] + 1}"
+            for col, value in enumerate(
+                (
+                    event["text"],
+                    event_time_text(event, full=True),
+                    since_previous,
+                    since_start,
+                    path,
+                )
+            ):
+                cell = QTableWidgetItem(value)
+                cell.setToolTip(f"<pre>{escape(event['raw'])}</pre>")
+                table.setItem(row, col, cell)
+        table.cellDoubleClicked.connect(
+            lambda row, _: self.jump_requested.emit(
+                events[row]["path"], events[row]["line"]
+            )
+        )
+        layout.addWidget(table)
+        dialog.show()
+
     def message(self, text, details=""):
         self.status.setText(text)
         self.status.setToolTip(details or text)
 
     def reset(self, has_logs):
+        if self._process_dialog is not None:
+            self._process_dialog.close()
         self.model.set_rows([])
+        self.steps.setEnabled(False)
         self.scan.setEnabled(has_logs)
         self.message("按日志中的起止时间计算。" if has_logs else "先打开要检查的日志。")
 
@@ -140,7 +203,10 @@ class ConnectionTimingPanel(QWidget):
             self.message(f"计算失败 · {data['error']}")
         else:
             rows, total, errors = data["rows"], data["total"], data["errors"]
+            if self._process_dialog is not None:
+                self._process_dialog.close()
             self.model.set_rows(rows)
+            self.steps.setEnabled(False)
             if not rows:
                 headline = "未找到带时间戳的配对或回连起点"
             else:

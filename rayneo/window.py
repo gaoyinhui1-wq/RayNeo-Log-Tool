@@ -54,6 +54,7 @@ from .filter_results import DiskMatchRows
 from .filter_history import FilterHistoryButton
 from .notes import NotesDock
 from .panels import ConnectionTimingPanel, DeviceInfoPanel, SearchDock
+from .sample_panels import BluetoothSamplePanel, SAMPLE_LABELS
 from .large_log import PAGE_LINES
 from .result_delegate import MatchHighlightDelegate
 from .viewer import VirtualLogViewer, VSCodeReportHighlighter
@@ -521,7 +522,7 @@ class AppWindow(QMainWindow):
         self.vsplit.addWidget(container)
 
         self.results = QTabWidget(self.vsplit)
-        self._timing_pane_height = None
+        self._log_data_pane_height = None
         self.results.setObjectName("BottomTabs")
         self.txt_analysis = QPlainTextEdit()
         self.txt_analysis.setObjectName("ReportView")
@@ -575,6 +576,14 @@ class AppWindow(QMainWindow):
         self.connection_timings.scan_requested.connect(self.start_connection_timings)
         self.connection_timings.jump_requested.connect(self.goto)
         self.results.addTab(self.connection_timings, "配对／回连耗时")
+        self.sample_panels = {}
+        for kind, label in SAMPLE_LABELS.items():
+            panel = BluetoothSamplePanel(kind, self.results)
+            panel.scan_requested.connect(self.start_bluetooth_samples)
+            panel.jump_requested.connect(self.goto)
+            self.results.addTab(panel, label)
+            self.sample_panels[kind] = panel
+        self._log_data_pages = (self.connection_timings, *self.sample_panels.values())
         navigation = QWidget()
         match_navigation = QHBoxLayout(navigation)
         match_navigation.setContentsMargins(1, 0, 3, 0)
@@ -599,8 +608,8 @@ class AppWindow(QMainWindow):
         self.vsplit.setStretchFactor(0, 4)
         self.vsplit.setStretchFactor(1, 1)
         self.vsplit.setSizes([560, 108])
-        self.vsplit.splitterMoved.connect(self._timing_splitter_moved)
-        self.results.currentChanged.connect(self._update_timing_pane_size)
+        self.vsplit.splitterMoved.connect(self._log_data_splitter_moved)
+        self.results.currentChanged.connect(self._update_log_data_pane_size)
         rl.addWidget(self.vsplit, 1)
         self.hsplit.addWidget(right)
         self.hsplit.setStretchFactor(0, 0)
@@ -795,7 +804,7 @@ class AppWindow(QMainWindow):
         if record_module is not None:
             record_module.clear_record_cache()
         self.file_list_data = sorted(files, key=lambda p: os.path.basename(p).lower())
-        self.connection_timings.reset(
+        self._reset_log_data_pages(
             any(path not in self._auxiliary_paths for path in files)
         )
         self._file_incident_counts = {}
@@ -994,7 +1003,7 @@ class AppWindow(QMainWindow):
             self.vsplit.addWidget(self.results)
             self.results.show()
             self.vsplit.setSizes(sizes)
-            self._update_timing_pane_size()
+            self._update_log_data_pane_size()
             bar.setValue(old_top)
             dialog.deleteLater()
 
@@ -1235,7 +1244,7 @@ class AppWindow(QMainWindow):
         self._report_file = None
         self._report_truncated = False
         self.txt_analysis.setPlainText("日志已保存。按 F5 重新分析。")
-        self.connection_timings.reset(True)
+        self._reset_log_data_pages(True)
         if hasattr(self, "_report_dialog"):
             self._report_dialog.hide()
         self.incidents = []
@@ -1290,27 +1299,43 @@ class AppWindow(QMainWindow):
     def show_connection_timings(self):
         self.results.show()
         self.results.setCurrentWidget(self.connection_timings)
-        self._update_timing_pane_size()
+        self._update_log_data_pane_size()
 
-    def _update_timing_pane_size(self, *_):
+    def _update_log_data_pane_size(self, *_):
         if self.vsplit.indexOf(self.results) < 0 or self.results.isHidden():
             return
         viewer_height, results_height = self.vsplit.sizes()
         total = viewer_height + results_height
-        if self.results.currentWidget() is self.connection_timings:
+        if self.results.currentWidget() in self._log_data_pages:
             target = min(174, total // 2)
-            if results_height < target and self._timing_pane_height is None:
-                self._timing_pane_height = results_height
+            if results_height < target and self._log_data_pane_height is None:
+                self._log_data_pane_height = results_height
                 self.vsplit.setSizes([total - target, target])
-        elif self._timing_pane_height is not None:
-            original = self._timing_pane_height
-            self._timing_pane_height = None
+        elif self._log_data_pane_height is not None:
+            original = self._log_data_pane_height
+            self._log_data_pane_height = None
             self.vsplit.setSizes([total - original, original])
 
-    def _timing_splitter_moved(self, *_):
-        self._timing_pane_height = None
+    def _log_data_splitter_moved(self, *_):
+        self._log_data_pane_height = None
+
+    def _reset_log_data_pages(self, has_logs):
+        for panel in self._log_data_pages:
+            panel.reset(has_logs)
 
     def start_connection_timings(self):
+        self._start_log_data_job(
+            "connection_timings", (self.connection_timings,), "正在计算配对／回连耗时…"
+        )
+
+    def start_bluetooth_samples(self):
+        self._start_log_data_job(
+            "bluetooth_samples",
+            tuple(self.sample_panels.values()),
+            "正在读取蓝牙与上镜记录…",
+        )
+
+    def _start_log_data_job(self, operation, panels, message):
         if self._busy():
             self.statusBar().showMessage("当前打开或分析任务尚未结束")
             return
@@ -1320,31 +1345,35 @@ class AppWindow(QMainWindow):
             if path not in self._auxiliary_paths and path not in self._binary_paths
         ]
         if not paths:
-            self.connection_timings.message("当前没有可计算的文本日志")
+            for panel in panels:
+                panel.message("当前没有可读取的文本日志")
             return
         from .job_process import AnalysisProcess
 
-        self.show_connection_timings()
-        self.connection_timings.scan.setEnabled(False)
-        self.connection_timings.message("正在扫描日志…")
+        for panel in panels:
+            panel.scan.setEnabled(False)
+            panel.message("正在扫描日志…")
         self.progress.show()
-        self.analysis_progress(0, "正在计算配对／回连耗时…")
+        self.analysis_progress(0, message)
         self.worker = AnalysisProcess(
-            self._analysis_session, {"operation": "connection_timings", "paths": paths}
+            self._analysis_session, {"operation": operation, "paths": paths}
         )
         self.worker.progress.connect(self.analysis_progress)
-        self.worker.finished.connect(self.connection_timings_done)
+        self.worker.finished.connect(lambda data: self._log_data_job_done(panels, data))
         self._analysis_pending = True
         self.btn_cancel.setEnabled(True)
         self.worker.start()
 
-    def connection_timings_done(self, data):
+    def _log_data_job_done(self, panels, data):
         self._analysis_pending = False
         self._refresh_cancel_state()
         self.progress.hide()
-        self.connection_timings.show_result(data)
-        self.lbl_status.setText(self.connection_timings.status.text())
-        self.statusBar().showMessage(self.connection_timings.status.text())
+        for panel in panels:
+            panel.show_result(data)
+        current = self.results.currentWidget()
+        status = (current if current in panels else panels[0]).status.text()
+        self.lbl_status.setText(status)
+        self.statusBar().showMessage(status)
 
     def start_analysis(self, paths, is_file_list, prepared=None):
         if self._busy():
@@ -1429,7 +1458,7 @@ class AppWindow(QMainWindow):
         selected_path = self.current_file
         if refresh_files:
             self.clear_filter_results()
-            self.connection_timings.reset(
+            self._reset_log_data_pages(
                 any(path not in self._auxiliary_paths for path in files)
             )
             self._input_generation += 1
@@ -1481,10 +1510,7 @@ class AppWindow(QMainWindow):
         keep_filter = self.results.currentIndex() == 2 and (
             self.match_model.search_spec is not None or not self.btn_filter.isEnabled()
         )
-        if (
-            not keep_filter
-            and self.results.currentWidget() is not self.connection_timings
-        ):
+        if not keep_filter and self.results.currentWidget() not in self._log_data_pages:
             self.results.setCurrentIndex(0)
             self.results.show()
         if self.current_file is None and self.file_list_data:
@@ -1915,7 +1941,7 @@ class AppWindow(QMainWindow):
 
     def toggle_results(self):
         self.results.setVisible(not self.results.isVisible())
-        self._update_timing_pane_size()
+        self._update_log_data_pane_size()
 
     def open_decrypt_dialog(self):
         # A single dialog; selected local source and output never leave the computer.
