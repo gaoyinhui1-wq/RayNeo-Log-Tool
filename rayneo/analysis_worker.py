@@ -97,23 +97,10 @@ class WorkerThread(QThread):
         if reuse:
             files_content = self.prepared.get("files_content", {})
             metadata_content = self.prepared.get("metadata_content", {})
-            device_info = self.prepared.get("device_info", {})
             preprocess_notes = list(self.prepared.get("preprocess_notes", []))
             preprocess_dir = self.prepared.get("preprocess_dir")
             available_dates = list(self.prepared.get("available_dates", []))
             analysis_cache = dict(self.prepared.get("analysis_cache", {}))
-            device_sources = _device_info_sources(
-                files_content,
-                metadata_content,
-                self.issue_times,
-                date_only=self.date_only,
-                range_start=self.range_start,
-                range_end=self.range_end,
-            )
-            global_ref = self.range_end or (
-                max(self.issue_times) if self.issue_times else None
-            )
-            device_info = extract_device_info(device_sources, reference_time=global_ref)
             self._progress_throttled(5, f"复用日志缓存：{len(files_content)} 个文件")
         else:
             clear_record_cache()
@@ -177,6 +164,23 @@ class WorkerThread(QThread):
                     if d:
                         all_times.append(datetime(d.year, d.month, d.day))
 
+            available_dates = sorted({t.date().isoformat() for t in all_times})
+            if metadata_content:
+                preprocess_notes.append(
+                    f"眼镜元数据快速解析：{len(metadata_content)} 个文件"
+                )
+            preprocess_notes.append(f"有效日志文件：{len(files_content)} 个")
+
+        device_scope = (
+            tuple(self.issue_times),
+            self.date_only,
+            self.range_start,
+            self.range_end,
+        )
+        if reuse and self.prepared.get("device_scope") == device_scope:
+            device_info = self.prepared["device_info"]
+        else:
+            self._progress_throttled(38, "读取设备和版本信息")
             device_sources = _device_info_sources(
                 files_content,
                 metadata_content,
@@ -185,17 +189,10 @@ class WorkerThread(QThread):
                 range_start=self.range_start,
                 range_end=self.range_end,
             )
-            self._progress_throttled(38, "读取设备和版本信息")
             global_ref = self.range_end or (
                 max(self.issue_times) if self.issue_times else None
             )
             device_info = extract_device_info(device_sources, reference_time=global_ref)
-            available_dates = sorted({t.date().isoformat() for t in all_times})
-            if metadata_content:
-                preprocess_notes.append(
-                    f"眼镜元数据快速解析：{len(metadata_content)} 个文件"
-                )
-            preprocess_notes.append(f"有效日志文件：{len(files_content)} 个")
 
         reports = defaultdict(list)
         analysis_errors = []
@@ -543,6 +540,7 @@ class WorkerThread(QThread):
                     "files_content": files_content,
                     "metadata_content": metadata_content,
                     "device_info": device_info,
+                    "device_scope": device_scope,
                     "preprocess_notes": preprocess_notes,
                     "preprocess_dir": preprocess_dir,
                     "available_dates": available_dates,

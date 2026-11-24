@@ -184,10 +184,10 @@ class AnalysisProcess(QThread):
 
 
 class SearchProcess(QThread):
-    completed = pyqtSignal(object, bool)
+    completed = pyqtSignal(object)
     failed = pyqtSignal(str)
 
-    def __init__(self, paths, query, regex, case_sensitive):
+    def __init__(self, paths, query, regex, case_sensitive, keyword_mode="single"):
         super().__init__()
         self.session = JobSession()
         self._generation = self.session.generation
@@ -197,6 +197,7 @@ class SearchProcess(QThread):
             "query": query,
             "regex": regex,
             "case_sensitive": case_sensitive,
+            "keyword_mode": keyword_mode,
         }
 
     def requestInterruption(self):
@@ -204,31 +205,41 @@ class SearchProcess(QThread):
         self.session.stop()
 
     def run(self):
+        directory = None
         try:
+            from .filter_results import DiskMatchRows
+            from .matching import SearchSpec
+
             result = self.session.execute(self.request, generation=self._generation)
             if result.get("error"):
                 raise RuntimeError(result["error"])
-            from .matching import HighlightedRows, SearchSpec
-
-            rows = HighlightedRows(SearchSpec(**result["spec"]))
-            rows.extend(result["rows"])
-            rows.spans = [
-                tuple(tuple(span) for span in spans) for spans in result["spans"]
-            ]
-            rows.first_matches = [tuple(span) for span in result["first_matches"]]
-            self.completed.emit(rows, result["truncated"])
+            directory = tempfile.TemporaryDirectory(prefix="rayneo_filter_")
+            os.replace(result["database"], Path(directory.name, "matches.sqlite"))
+            rows = DiskMatchRows(
+                directory,
+                result["count"],
+                result["files"],
+                SearchSpec(**result["spec"]),
+                result["skipped"],
+            )
+            directory = None
+            self.completed.emit(rows)
         except JobCancelled:
-            self.completed.emit([], False)
+            self.completed.emit([])
         except Exception as exc:
             self.failed.emit(str(exc))
         finally:
             self.session.stop()
+            if directory is not None:
+                directory.cleanup()
 
 
 class FindProcess(QThread):
     completed = pyqtSignal(object)
 
-    def __init__(self, path, query, offset, regex, case_sensitive):
+    def __init__(
+        self, path, query, offset, regex, case_sensitive, paged=False, escaped=False
+    ):
         super().__init__()
         self.session = JobSession()
         self._generation = self.session.generation
@@ -240,6 +251,8 @@ class FindProcess(QThread):
             "offset": offset,
             "regex": regex,
             "case_sensitive": case_sensitive,
+            "paged": paged,
+            "escaped": escaped,
         }
 
     def requestInterruption(self):
@@ -292,6 +305,9 @@ def serve(directory):
         threading.Thread(target=watch_parent, daemon=True).start()
     prepared = None
     fingerprint = None
+    diagnosis_signature = None
+    diagnosis_cache = {}
+    table_signature = None
 
     def send(kind, **data):
         print(
@@ -299,6 +315,34 @@ def serve(directory):
             flush=True,
             file=output_stream,
         )
+
+    def source_signature(paths):
+        from .text import file_revision
+
+        stamps = []
+        for path in paths:
+            try:
+                stamp = file_revision(path)
+            except OSError:
+                stamp = None
+            stamps.append((path, stamp))
+        return tuple(stamps)
+
+    def progress_callback(verb):
+        last_update = 0.0
+
+        def update(index, count, name):
+            nonlocal last_update
+            now = time.monotonic()
+            if now - last_update >= 0.15:
+                last_update = now
+                send(
+                    "progress",
+                    value=10 + int(85 * (index - 1) / count),
+                    message=f"{verb} {name}（{index}/{count}）",
+                )
+
+        return update
 
     root = Path(directory)
     input_stream = (root / "request.jsonl").open("rb")
@@ -316,7 +360,110 @@ def serve(directory):
         try:
             request = json.loads(line, object_hook=decode)
             operation = request.pop("operation")
-            if operation == "analysis":
+            if operation == "versions":
+                from .log_scan import read_versions
+
+                send("result", data={"device_info": read_versions(request["paths"])})
+            elif operation == "log_tables":
+                from .log_tables import read_log_tables
+
+                paths = request["paths"]
+                signature = source_signature(paths)
+                tables = read_log_tables(paths, progress_callback("读取日志"))
+                table_signature = signature
+                send("result", data={"tables": tables})
+            elif operation == "diagnose":
+                from . import rules
+                from .diagnosis import analysis_windows, diagnose, diagnosis_report
+                from .log_tables import LogTables, read_log_tables
+
+                started = time.monotonic()
+                rules.RULES_PATH = Path(request["rules_path"])
+                try:
+                    rules.reload_external_rules()
+                except Exception as exc:
+                    send("result", data={"error": f"异常规则文件错误：{exc}"})
+                    continue
+                paths = list(dict.fromkeys(request["paths"]))
+                signature = source_signature(paths)
+                changed = (
+                    diagnosis_signature is not None and diagnosis_signature != signature
+                )
+                if diagnosis_signature != signature:
+                    diagnosis_signature = signature
+                    diagnosis_cache.clear()
+                windows = analysis_windows(
+                    request["issue_times"],
+                    request["window_minutes"],
+                    request["analysis_mode"],
+                    request["range_start"],
+                    request["range_end"],
+                )
+                auxiliary = set(request.get("auxiliary_paths", ()))
+                log_paths = [path for path in paths if path not in auxiliary]
+                log_signature = tuple(
+                    entry for entry in signature if entry[0] not in auxiliary
+                )
+                notification_only = request["analysis_mode"] == "通知异常"
+                key = (
+                    windows,
+                    rules.RULES_SIGNATURE,
+                    tuple(log_paths),
+                    notification_only,
+                )
+                refresh_tables = (
+                    request.get("refresh_tables") or table_signature != log_signature
+                )
+                table_data = None
+                cached = diagnosis_cache.get(key)
+                if cached is None:
+                    locations = []
+                    tables = LogTables() if refresh_tables else None
+                    conclusions, errors, trace = diagnose(
+                        log_paths,
+                        windows,
+                        rules.DISABLED_RULE_NAMES,
+                        progress_callback("分析"),
+                        rules.EXTERNAL_RULES,
+                        locations=locations,
+                        log_tables=tables,
+                        notification_only=notification_only,
+                    )
+                    if tables is not None:
+                        table_data = tables.result(errors)
+                    cached = conclusions, locations, errors, trace
+                    if len(diagnosis_cache) >= 8:
+                        diagnosis_cache.pop(next(iter(diagnosis_cache)))
+                    diagnosis_cache[key] = cached
+                    reused = False
+                else:
+                    reused = True
+                if refresh_tables:
+                    if table_data is None:
+                        table_data = read_log_tables(
+                            log_paths, progress_callback("读取日志")
+                        )
+                    table_signature = log_signature
+                conclusions, locations, errors, link_trace = cached
+                devices = request.get("device_info") or {}
+                report = diagnosis_report(conclusions, devices, errors, link_trace)
+                send(
+                    "result",
+                    data={
+                        "source_changed": changed,
+                        "file_paths": paths,
+                        "analyzed_file_count": len(log_paths),
+                        "report_text": report,
+                        "tables": table_data,
+                        "incidents": locations,
+                        "device_info": devices,
+                        "analysis_errors": errors,
+                        "analysis_seconds": time.monotonic() - started,
+                        "reused_cache": reused,
+                        "prepared_payload": {"process_token": os.getpid()},
+                    },
+                )
+            elif operation == "analysis":
                 from . import rules
                 from .analysis_worker import WorkerThread
                 from .ingestion import collect_input_files
@@ -344,6 +491,9 @@ def serve(directory):
                 worker.run()
                 data = outcome[0] if outcome else {"error": "后台任务未返回结果"}
                 if not data.get("error"):
+                    data["source_changed"] = (
+                        fingerprint is not None and signature != fingerprint
+                    )
                     prepared = data.pop("prepared_payload")
                     fingerprint = signature
                     data["file_paths"] = list(data.pop("files_content"))
@@ -385,50 +535,81 @@ def serve(directory):
                     data["point_results"] = []
                 send("result", data=data)
             elif operation == "filter":
-                from .search import scan_log_matches
-
-                rows, truncated = scan_log_matches(
-                    dict.fromkeys(request["paths"]),
-                    request["query"],
-                    request["regex"],
-                    request["case_sensitive"],
-                    include_spans=True,
-                    preview_chars=8192,
-                )
                 from dataclasses import asdict
 
+                from .filter_results import write_filter_results
+                from .matching import SearchSpec
+
+                paths = request.pop("paths")
+                destination = root / "matches.sqlite"
+                spec = SearchSpec(**request)
+                count, files, skipped = write_filter_results(destination, paths, spec)
                 send(
                     "result",
                     data={
-                        "rows": rows,
-                        "spec": asdict(rows.spec),
-                        "spans": rows.spans,
-                        "first_matches": rows.first_matches,
-                        "truncated": truncated,
+                        "count": count,
+                        "files": files,
+                        "spec": asdict(spec),
+                        "skipped": skipped,
+                        "database": str(destination),
                     },
                 )
             elif operation == "find":
                 import re
 
-                from .ingestion import read_text_file
+                from .ingestion import (
+                    escaped_binary_preview,
+                    read_text_file,
+                    scan_text_file,
+                )
 
-                content = read_text_file(request["path"]) or ""
                 pattern = re.compile(
                     request["query"]
                     if request["regex"]
                     else re.escape(request["query"]),
                     0 if request["case_sensitive"] else re.I,
                 )
-                hit = pattern.search(content, request["offset"]) or pattern.search(
-                    content
-                )
+                if request.get("paged"):
+
+                    def find_paged(stream):
+                        fallback = None
+                        start = 0
+                        for row, line in enumerate(stream):
+                            match = pattern.search(line)
+                            if match and fallback is None:
+                                fallback = (
+                                    start + match.start(),
+                                    match.end() - match.start(),
+                                    row,
+                                    match.start(),
+                                )
+                            offset = request["offset"] - start
+                            if offset <= len(line):
+                                hit = pattern.search(line, max(0, offset))
+                                if hit:
+                                    return (
+                                        start + hit.start(),
+                                        hit.end() - hit.start(),
+                                        row,
+                                        hit.start(),
+                                    )
+                            start += len(line)
+                        return fallback
+
+                    match = scan_text_file(request["path"], find_paged) or (-1, 0)
+                else:
+                    content = (
+                        escaped_binary_preview(request["path"])
+                        if request.get("escaped")
+                        else read_text_file(request["path"]) or ""
+                    )
+                    hit = pattern.search(content, request["offset"]) or pattern.search(
+                        content
+                    )
+                    match = (hit.start(), hit.end() - hit.start()) if hit else (-1, 0)
                 send(
                     "result",
-                    data={
-                        "match": (hit.start(), hit.end() - hit.start())
-                        if hit
-                        else (-1, 0)
-                    },
+                    data={"match": match},
                 )
             else:
                 raise ValueError("未知后台任务")

@@ -47,7 +47,8 @@ SPP_FAILURE = re.compile(
     re.I,
 )
 ANCS_SCOPE = re.compile(
-    r"\bANCS(?:Status|State)?\b|7905f431-b5ce-4e99-a40f-4b1e122d00d0", re.I
+    r"\bANCS(?:Status|State|Adapter)?\b|\b(?:on|handle)ANCS\w+\b|\bNOTIFICATION_MSG_TYPE_SEND_ANCS\b|7905f431-b5ce-4e99-a40f-4b1e122d00d0",
+    re.I,
 )
 NOTIFY_SCOPE = re.compile(
     r"NotificationSync|RNNotification|mirrorNotification|通知同步|手机通知|NotificationListenerService|shareSystemNotifications",
@@ -70,7 +71,7 @@ NORMAL_NOTIFY = re.compile(
     re.I,
 )
 MESSAGE_ID = re.compile(
-    r"""\b(?:notificationId|notification_id|notifId|messageId|uid)["']?\s*[:=]\s*["']?([\w-]+)""",
+    r"""\b(?:notificationId|notification_id|notificationUid|notification_uid|notifId|messageId|message_id|uid)["']?\s*[:=]\s*["']?([\w-]+)""",
     re.I,
 )
 ACK = re.compile(
@@ -118,15 +119,15 @@ def detect_notification_incidents(files_content):
     for path, text in files_content.items():
         for record in _build_fast_records(text):
             line = record["line"]
+            ancs = bool(ANCS_SCOPE.search(line))
+            notify = bool(NOTIFY_SCOPE.search(line))
+            if not ancs and not notify:
+                continue
             if (
                 PAYLOAD.search(line)
                 or NEGATIVE.search(line)
                 or NORMAL_NOTIFY.search(line)
             ):
-                continue
-            ancs = bool(ANCS_SCOPE.search(line))
-            notify = bool(NOTIFY_SCOPE.search(line))
-            if not ancs and not notify:
                 continue
             if PERMISSION.search(line):
                 name = "通知同步权限未就绪"
@@ -173,9 +174,14 @@ def classify_link_incidents(incidents, files_content, wait_seconds=90):
     Unknown-device mixed streams are not correlated across devices or files.
     """
     indexes = {}
-    for path, text in files_content.items():
+    paths = {
+        item.get("full_path")
+        for item in incidents
+        if _channel(item) is not None or item.get("diagnostic_source") == "notification"
+    }
+    for path in paths.intersection(files_content):
         records = sorted(
-            _build_fast_records(text),
+            _build_fast_records(files_content[path]),
             key=lambda r: (
                 r.get("effective_time") is None,
                 r.get("effective_time"),
@@ -183,12 +189,13 @@ def classify_link_incidents(incidents, files_content, wait_seconds=90):
             ),
         )
         timed = [r for r in records if r.get("effective_time") is not None]
+        device_by_line = {r["index"]: _device(r["line"]) for r in records}
         indexes[path] = (
-            records,
             timed,
             [r["effective_time"] for r in timed],
             {r["index"]: r for r in records},
-            {d for r in records if (d := _device(r["line"]))},
+            device_by_line,
+            {d for d in device_by_line.values() if d},
         )
     output = []
     for original in incidents:
@@ -199,7 +206,7 @@ def classify_link_incidents(incidents, files_content, wait_seconds=90):
         if (channel is None and not notification) or path not in indexes:
             output.append(item)
             continue
-        records, timed, times, by_line, devices = indexes[path]
+        timed, times, by_line, device_by_line, devices = indexes[path]
         anchor = by_line.get(item.get("line"))
         if anchor is None:
             item.update(
@@ -211,7 +218,7 @@ def classify_link_incidents(incidents, files_content, wait_seconds=90):
             continue
         line = anchor["line"]
         t = anchor.get("effective_time")
-        device = _device(line)
+        device = device_by_line[anchor["index"]]
         if (
             PAYLOAD.search(line)
             or NEGATIVE.search(line)
@@ -251,7 +258,7 @@ def classify_link_incidents(incidents, files_content, wait_seconds=90):
         ]
 
         def compatible(record):
-            other = _device(record["line"])
+            other = device_by_line[record["index"]]
             if mixed_unknown:
                 return False
             if device:
@@ -315,7 +322,11 @@ def classify_link_incidents(incidents, files_content, wait_seconds=90):
             item["evidence"] = (item.get("evidence") or []) + [recovery["text"]]
         elif channel and not mixed_unknown:
             observed = (
-                [r["effective_time"] for r in timed if _device(r["line"]) == device]
+                [
+                    r["effective_time"]
+                    for r in timed
+                    if device_by_line[r["index"]] == device
+                ]
                 if len(devices) > 1
                 else observation_times_for(files_content[path])
             )

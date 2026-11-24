@@ -145,7 +145,7 @@ class VSCodeReportHighlighter(QSyntaxHighlighter):
             return
         if text.startswith("分析范围："):
             self.setFormat(0, len(text), self.scope)
-        elif text in ("设备信息", "分析结果与日志证据"):
+        elif text in ("设备信息", "分析结果与日志证据", "配对／回连过程"):
             self.setFormat(0, len(text), self.section)
         elif self._number_heading.match(text):
             self.setFormat(0, len(text), self.heading)
@@ -172,6 +172,7 @@ class VirtualLogViewer(QAbstractScrollArea):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._log = ""
+        self._line_base = 0
         self._starts = array("I", [0])
         self._line = self._column = 0
         self._anchor = self._cursor = 0
@@ -207,7 +208,9 @@ class VirtualLogViewer(QAbstractScrollArea):
         self._cw = max(5, fm.horizontalAdvance("0"))
 
     def _gutter_width(self):
-        return max(54, max(5, len(str(self.line_count()))) * self._cw + 15)
+        return max(
+            54, max(5, len(str(self._line_base + self.line_count()))) * self._cw + 15
+        )
 
     def line_count(self):
         return len(self._starts)
@@ -223,10 +226,11 @@ class VirtualLogViewer(QAbstractScrollArea):
             return ""
         return self._log[self._starts[line] : self._line_end(line)]
 
-    def set_log_text(self, value, offsets=None):
+    def set_log_text(self, value, offsets=None, line_base=0):
         self._dragging = False
         self._drag_timer.stop()
         self._log = value or ""
+        self._line_base = line_base
         self._starts = offsets if offsets is not None else _line_offsets(self._log)
         self._line = self._column = self._mark_len = 0
         self._anchor = self._cursor = 0
@@ -317,7 +321,9 @@ class VirtualLogViewer(QAbstractScrollArea):
                 ranges.append(span)
             column = start - self._starts[row]
             for a, b in clipped_spans(
-                self._filter_highlights.get(row, ()), column, column + len(displayed)
+                self._filter_highlights.get(self._line_base + row, ()),
+                column,
+                column + len(displayed),
             ):
                 if a == b:
                     continue
@@ -359,6 +365,10 @@ class VirtualLogViewer(QAbstractScrollArea):
         # Constant-size selection state even for multi-million-line logs.
         self._anchor = 0
         self._move_to(len(self._log), extend=True, reveal=False)
+
+    def select_current_line(self):
+        self._anchor = self._starts[self._line]
+        self._move_to(self._line_end(self._line), extend=True, reveal=False)
 
     def _move_to(self, position, extend=False, reveal=True):
         self._cursor = min(len(self._log), max(0, int(position)))
@@ -436,7 +446,7 @@ class VirtualLogViewer(QAbstractScrollArea):
                 gutter - 9,
                 self._lh - 2,
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                str(row + 1),
+                str(self._line_base + row + 1),
             )
             start, displayed, layout, text_line = self._layout_for_line(
                 row, highlight=True
@@ -485,7 +495,9 @@ class VirtualLogViewer(QAbstractScrollArea):
             layout.draw(painter, QPointF(text_left, y + 1), selections)
             column = start - self._starts[row]
             for a, b in clipped_spans(
-                self._filter_highlights.get(row, ()), column, column + len(displayed)
+                self._filter_highlights.get(self._line_base + row, ()),
+                column,
+                column + len(displayed),
             ):
                 if a == b:
                     offset = utf16[a] if utf16 is not None else a
@@ -512,6 +524,10 @@ class VirtualLogViewer(QAbstractScrollArea):
             self.setFocus()
             self._dragging = True
             self._drag_pos = event.position().toPoint()
+            self._drag_origin = self._drag_pos
+            self._click_selects_line = not bool(
+                event.modifiers() & Qt.KeyboardModifier.ShiftModifier
+            )
             self._move_to(
                 self._offset_at(self._drag_pos),
                 extend=bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier),
@@ -524,6 +540,8 @@ class VirtualLogViewer(QAbstractScrollArea):
     def mouseMoveEvent(self, event):
         if self._dragging:
             self._drag_pos = event.position().toPoint()
+            if self._drag_pos != self._drag_origin:
+                self._click_selects_line = False
             self._move_to(self._offset_at(self._drag_pos), extend=True, reveal=False)
             if self.viewport().rect().contains(self._drag_pos):
                 self._drag_timer.stop()
@@ -535,9 +553,11 @@ class VirtualLogViewer(QAbstractScrollArea):
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and self._dragging:
-            self._move_to(
-                self._offset_at(event.position().toPoint()), extend=True, reveal=False
-            )
+            position = event.position().toPoint()
+            if self._click_selects_line and position == self._drag_origin:
+                self.select_current_line()
+            else:
+                self._move_to(self._offset_at(position), extend=True, reveal=False)
             self._dragging = False
             self._drag_timer.stop()
             event.accept()
@@ -607,6 +627,9 @@ class VirtualLogViewer(QAbstractScrollArea):
         copy_action = menu.addAction("复制\tCtrl+C", self.copy)
         copy_action.setEnabled(bool(self._log))
         menu.addAction("复制当前行", self.copy_current_line).setEnabled(bool(self._log))
+        menu.addAction("选中当前行", self.select_current_line).setEnabled(
+            bool(self._log)
+        )
         menu.addSeparator()
         menu.addAction("全选\tCtrl+A", self.select_all).setEnabled(bool(self._log))
         menu.exec(event.globalPos())
@@ -696,7 +719,7 @@ class VirtualLogViewer(QAbstractScrollArea):
         self.viewport().update()
 
     def current_line_col(self):
-        return self._line + 1, self._column + 1
+        return self._line_base + self._line + 1, self._column + 1
 
 
 class PlainFastViewer(QPlainTextEdit):

@@ -41,7 +41,7 @@ class BuildChecks(unittest.TestCase):
             result = json.loads(report.read_text(encoding="utf-8"))
             self.assertEqual(result["status"], "passed")
             self.assertIn("Qt rendering", result["checks"])
-            self.assertIn("background analysis and report", result["checks"])
+            self.assertIn("background diagnosis and concise report", result["checks"])
             self.assertIn("AES-GCM roundtrip", result["checks"])
 
     def test_windows_builder_refuses_to_produce_a_linux_binary(self):

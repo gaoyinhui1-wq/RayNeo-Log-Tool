@@ -15,6 +15,7 @@ def run_checks():
     # are usable, rather than only proving that the Qt main window can open.
     import lz4.frame
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from PyQt6.QtCore import QSettings
     from PyQt6.QtWidgets import QApplication
     from . import __version__
     from .window import AppWindow
@@ -29,7 +30,12 @@ def run_checks():
     )
     app = QApplication.instance() or QApplication([])
     app.setStyle("Fusion")
-    window = AppWindow()
+    settings_dir = tempfile.TemporaryDirectory(prefix="rayneo_smoke_settings_")
+    window = AppWindow(
+        QSettings(
+            str(Path(settings_dir.name) / "settings.ini"), QSettings.Format.IniFormat
+        )
+    )
     errors = []
     checks = ["LZ4 roundtrip", "AES-GCM roundtrip", "main window imports"]
 
@@ -51,8 +57,15 @@ def run_checks():
         with tempfile.TemporaryDirectory(prefix="rayneo_smoke_") as temp:
             source = Path(temp) / "packaged_demo.log"
             source.write_text(
-                "2026-01-01 10:00:00 [BLE] BLE physical connect timeout\n"
-                "2026-01-01 10:00:01 [INFO] disconnect then DISCONNECT\n",
+                "2026-01-01 09:59:59 [App] appVersion=1.2.3, sdkVersion=4.5.6, androidVersion=15\n"
+                "2026-01-01 10:00:00 [System] Bluetooth stack crashed\n"
+                "2026-01-01 10:00:00.500 ANCS subscribe failed\n"
+                "2026-01-01 10:00:01 [INFO] disconnect then DISCONNECT\n"
+                "2026-01-01 10:01:00.100 auto reconnect trigger deviceId=test\n"
+                "2026-01-01 10:01:01.250 BLE physical connect success deviceId=test\n"
+                "2026-01-01 10:01:02.500 BLE RSSI=-51 deviceId=test\n"
+                "2026-01-01 10:01:03 [ChannelRate] device=test ch=BLE dir=RX current=0.01 KB/s avg=0.02 KB/s\n"
+                '2026-01-01 10:01:04 ANCS GlassesNotification displayed notificationId=12 message="通知已显示"\n',
                 encoding="utf-8",
             )
             # Error dialogs must not block an unattended CI runner.
@@ -63,14 +76,18 @@ def run_checks():
                 checks.append("application icon and permanent search")
                 window.start_preview([str(source)], True)
                 wait_for(lambda: not window._busy() and window.file_read_worker is None)
-                assert "physical connect timeout" in window.viewer._log
-                checks.append("file import and preview")
+                assert "Bluetooth stack crashed" in window.viewer._log
+                assert window.device_info.get("App版本") == "1.2.3"
+                assert window.device_info.get("RayneoNet SDK") == "v4.5.6"
+                checks.append("file import, preview and device versions")
                 window.reanalyze()
                 wait_for(lambda: not window._busy() and window.file_read_worker is None)
                 assert window.has_analyzed and window.incidents
-                assert window._report_dialog.isVisible()
+                assert window.incidents[0]["rule_id"] == "phone_bt"
+                assert "ANCS 订阅失败" in window.txt_analysis.toPlainText()
+                assert "配对／回连过程" not in window.txt_analysis.toPlainText()
                 assert window.last_analysis_metadata["process_token"] != os.getpid()
-                checks.append("background analysis and report")
+                checks.append("background diagnosis and concise report")
                 window.search_input.setText("disconnect")
                 window.filter_all()
                 wait_for(
@@ -85,6 +102,27 @@ def run_checks():
                 window.match_clicked(window.match_model.index(0, 2))
                 window.viewer.copy()
                 assert app.clipboard().text() == "disconnect"
+                window.show_connection_timings()
+                timing = window.connection_timings
+                wait_for(lambda: not window._busy() and timing.model.rowCount() == 1)
+                assert timing.model.data(timing.model.index(0, 3)) == "1.150 秒"
+                timing.table.activated.emit(timing.model.index(0, 5))
+                assert window.viewer.current_line_col()[0] == 6
+                checks.append("pairing and reconnect timing with source navigation")
+                sample_pages = window.sample_panels
+                window.results.setCurrentWidget(sample_pages["signal"])
+                wait_for(
+                    lambda: (
+                        not window._busy()
+                        and all(
+                            page.model.rowCount() == 1 for page in sample_pages.values()
+                        )
+                    )
+                )
+                assert sample_pages["signal"].model.rows[0][3][1] == -51
+                assert sample_pages["rate"].model.rows[0][3][3] == "0.01 KB/s"
+                assert sample_pages["mirrored"].model.rows[0][3][5] == "通知已显示"
+                checks.append("RSSI, ChannelRate, and mirrored ANCS pages")
                 assert not window.grab().isNull()
                 checks.extend(
                     ["filter hit metadata", "navigation and clipboard", "Qt rendering"]
@@ -94,6 +132,7 @@ def run_checks():
         for worker in (
             window.worker,
             window.preview_worker,
+            window.version_worker,
             window.file_read_worker,
             window.search_worker,
             window.find_worker,
@@ -104,6 +143,7 @@ def run_checks():
                 worker.wait(5000)
         window.close()
         app.processEvents()
+        settings_dir.cleanup()
     return {"status": "passed", "version": __version__, "checks": checks}
 
 

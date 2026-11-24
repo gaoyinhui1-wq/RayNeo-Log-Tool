@@ -13,6 +13,7 @@ import tarfile
 import tempfile
 import hashlib
 import shutil
+from contextlib import suppress
 from pathlib import Path, PurePosixPath
 
 
@@ -293,6 +294,11 @@ DECODE_SINGLE_LIMIT = 1024**3
 
 
 DECODE_TOTAL_LIMIT = 4 * 1024**3
+STAGING_PATH_LIMIT = 235
+
+
+class _DecodeLimit(ValueError):
+    pass
 
 
 class _DecodeBudget:
@@ -302,7 +308,7 @@ class _DecodeBudget:
     def add(self, amount):
         self.total += amount
         if self.total > DECODE_TOTAL_LIMIT:
-            raise RuntimeError("解压总量超过 4 GB 安全限制")
+            raise _DecodeLimit("解压总量超过 4 GB 安全限制")
 
 
 def _decode_copy(reader, writer, budget, cancel=None, limit=DECODE_SINGLE_LIMIT):
@@ -315,7 +321,7 @@ def _decode_copy(reader, writer, budget, cancel=None, limit=DECODE_SINGLE_LIMIT)
             break
         written += len(chunk)
         if written > limit:
-            raise RuntimeError("解压单文件超过 1 GB 安全限制")
+            raise _DecodeLimit("解压单文件超过 1 GB 安全限制")
         budget.add(len(chunk))
         writer.write(chunk)
     return written
@@ -356,8 +362,37 @@ def _container_type(path):
     return None
 
 
+def _staging_path(path, staging_root):
+    def length(value):
+        return len(str(value).encode("utf-16-le", errors="surrogatepass")) // 2
+
+    if staging_root is None or length(path) <= STAGING_PATH_LIMIT:
+        return path
+    # Keep names and device-side classification while shortening deep temporary paths.
+    digest = hashlib.blake2s(os.fsencode(path.parent), digest_size=8).hexdigest()
+    bucket = "glasses_log" if _is_glasses_side_path(path) else "nested"
+    folder = staging_root / bucket / digest
+    name = path.name
+    if length(folder / name) > STAGING_PATH_LIMIT:
+        stem, suffix = path.stem, path.suffix[-24:]
+        marker = hashlib.blake2s(os.fsencode(name), digest_size=4).hexdigest()
+        capacity = max(
+            1, (STAGING_PATH_LIMIT - length(folder / (marker + suffix))) // 2
+        )
+        name = f"{stem[:capacity]}-{marker}{suffix}"
+    return folder / name
+
+
 def _stream_decode_path(
-    source, output_dir, notes=None, depth=0, cancel=None, budget=None, display_name=None
+    source,
+    output_dir,
+    notes=None,
+    depth=0,
+    cancel=None,
+    budget=None,
+    display_name=None,
+    *,
+    staging_root=None,
 ):
     if notes is None:
         notes = []
@@ -377,7 +412,8 @@ def _stream_decode_path(
         # 已解包到输出目录的文件直接保留，避免反复复制。
         if source.parent.resolve() == output_dir.resolve():
             return [str(source)]
-        dest = _unique_path(output_dir / name)
+        dest = _unique_path(_staging_path(output_dir / name, staging_root))
+        dest.parent.mkdir(parents=True, exist_ok=True)
         with source.open("rb") as fi, dest.open("wb") as fo:
             try:
                 _decode_copy(fi, fo, budget, cancel)
@@ -387,7 +423,10 @@ def _stream_decode_path(
         return [str(dest)]
     if kind in ("vlog", "lz4", "gzip", "bzip2", "xz"):
         postfix = ".decrypted" if kind == "vlog" else ".unpacked"
-        target = _unique_path(output_dir / (name + postfix))
+        target = _unique_path(
+            _staging_path(output_dir / (name + postfix), staging_root)
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
         try:
             with source.open("rb") as fi, target.open("wb") as fo:
                 if kind == "vlog":
@@ -419,7 +458,7 @@ def _stream_decode_path(
                         )
                         written += len(plain)
                         if written > DECODE_SINGLE_LIMIT:
-                            raise RuntimeError("解密单文件超过 1 GB 安全限制")
+                            raise _DecodeLimit("解密单文件超过 1 GB 安全限制")
                         budget.add(len(plain))
                         fo.write(plain)
                         counter_expected += 1
@@ -443,6 +482,7 @@ def _stream_decode_path(
                     cancel,
                     budget,
                     _strip_container_suffixes(name),
+                    staging_root=staging_root,
                 )
                 target.unlink(missing_ok=True)
                 return result
@@ -456,41 +496,58 @@ def _stream_decode_path(
     root = output_dir / (
         _strip_container_suffixes(name) + ("_zip" if kind == "zip" else "_tar")
     )
-    root = _unique_path(root)
+    root = _unique_path(_staging_path(root, staging_root))
     root.mkdir(parents=True, exist_ok=True)
     outputs = []
+
+    def extract_member(member_name, open_member):
+        rel = _safe_member_path(member_name)
+        if rel is None:
+            return
+        target = _unique_path(_staging_path(root / rel, staging_root))
+        keep_target = False
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with open_member() as reader, target.open("wb") as writer:
+                _decode_copy(reader, writer, budget, cancel)
+            if _container_type(target):
+                outputs.extend(
+                    _stream_decode_path(
+                        target,
+                        target.parent,
+                        notes,
+                        depth + 1,
+                        cancel,
+                        budget,
+                        rel.name,
+                        staging_root=staging_root,
+                    )
+                )
+            else:
+                outputs.append(str(target))
+                keep_target = True
+        except (InterruptedError, _DecodeLimit):
+            raise
+        except Exception as exc:
+            notes.append(f"跳过归档条目 {member_name}：{exc}")
+        finally:
+            if not keep_target:
+                with suppress(OSError):
+                    target.unlink(missing_ok=True)
+
     if kind == "zip":
         with zipfile.ZipFile(source) as zf:
             items = zf.infolist()
             if sum(i.file_size for i in items) > DECODE_TOTAL_LIMIT:
-                raise RuntimeError("ZIP 文件展开总量超过 4 GB")
+                raise _DecodeLimit("ZIP 文件展开总量超过 4 GB")
             for info in items:
                 if cancel and cancel():
                     raise InterruptedError("用户已取消解压")
                 if info.is_dir():
                     continue
                 if info.file_size > DECODE_SINGLE_LIMIT:
-                    raise RuntimeError(f"ZIP 文件过大：{info.filename}")
-                rel = _safe_member_path(info.filename)
-                if not rel:
-                    continue
-                folder = root / rel.parent
-                folder.mkdir(parents=True, exist_ok=True)
-                target = _unique_path(folder / rel.name)
-                with zf.open(info, "r") as fi, target.open("wb") as fo:
-                    try:
-                        _decode_copy(fi, fo, budget, cancel)
-                    except BaseException:
-                        target.unlink(missing_ok=True)
-                        raise
-                if _container_type(target):
-                    child = _stream_decode_path(
-                        target, folder, notes, depth + 1, cancel, budget, rel.name
-                    )
-                    target.unlink(missing_ok=True)
-                    outputs.extend(child)
-                else:
-                    outputs.append(str(target))
+                    raise _DecodeLimit(f"ZIP 文件过大：{info.filename}")
+                extract_member(info.filename, lambda: zf.open(info, "r"))
     else:
         with tarfile.open(source, mode="r:*") as tf:
             for info in tf:
@@ -499,30 +556,8 @@ def _stream_decode_path(
                 if not info.isfile():
                     continue
                 if info.size > DECODE_SINGLE_LIMIT:
-                    raise RuntimeError(f"TAR 文件过大：{info.name}")
-                rel = _safe_member_path(info.name)
-                if not rel:
-                    continue
-                reader = tf.extractfile(info)
-                if reader is None:
-                    continue
-                folder = root / rel.parent
-                folder.mkdir(parents=True, exist_ok=True)
-                target = _unique_path(folder / rel.name)
-                with reader as fi, target.open("wb") as fo:
-                    try:
-                        _decode_copy(fi, fo, budget, cancel)
-                    except BaseException:
-                        target.unlink(missing_ok=True)
-                        raise
-                if _container_type(target):
-                    child = _stream_decode_path(
-                        target, folder, notes, depth + 1, cancel, budget, rel.name
-                    )
-                    target.unlink(missing_ok=True)
-                    outputs.extend(child)
-                else:
-                    outputs.append(str(target))
+                    raise _DecodeLimit(f"TAR 文件过大：{info.name}")
+                extract_member(info.name, lambda: tf.extractfile(info))
     notes.append(f"展开 {kind.upper()}：{name}（{len(outputs)} 文件）")
     return outputs
 
@@ -655,7 +690,12 @@ def prepare_log_inputs(
                 if work_dir is None:
                     work_dir = Path(tempfile.mkdtemp(prefix="rayneo_bt_analyzer_"))
                 decoded = _stream_decode_path(
-                    path, work_dir, notes, cancel=cancel_callback, budget=budget
+                    path,
+                    work_dir,
+                    notes,
+                    cancel=cancel_callback,
+                    budget=budget,
+                    staging_root=work_dir,
                 )
                 output_files.extend(decoded)
             except InterruptedError:
@@ -693,11 +733,8 @@ def _extract_glasses_binary_metadata(path: str):
         chunks = []
         seen = set()
 
-        for raw in re.findall(rb"[\x20-\x7e]{4,240}", data):
-            try:
-                text = raw.decode("utf-8", errors="ignore").strip()
-            except Exception:
-                continue
+        for match in re.finditer(rb"[\x20-\x7e]{4,240}", data):
+            text = match[0].decode("ascii").strip()
             if not text:
                 continue
             low = text.lower()
@@ -714,6 +751,10 @@ def _extract_glasses_binary_metadata(path: str):
                     "gatt",
                     "bond",
                     "mfi",
+                    "sn:",
+                    "sn=",
+                    '"sn"',
+                    "serialnumber",
                 )
             ):
                 continue
@@ -731,29 +772,69 @@ def _extract_glasses_binary_metadata(path: str):
         return None
 
 
+def text_encoding(path):
+    """Return the first decoder to try, or None for a binary log."""
+    with open(path, "rb") as stream:
+        head = stream.read(8192)
+    if head.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return "utf-16"
+    if b"\0" in head:
+        even = head[0::2].count(0)
+        odd = head[1::2].count(0)
+        if odd >= max(2, len(head) // 8) and even <= len(head) // 50:
+            return "utf-16-le"
+        if even >= max(2, len(head) // 8) and odd <= len(head) // 50:
+            return "utf-16-be"
+        return None
+    controls = sum(
+        head.count(bytes((value,)))
+        for value in range(1, 32)
+        if value not in (9, 10, 12, 13, 27)
+    )
+    if controls >= 4 and controls > len(head) // 20:
+        return None
+    return "utf-8-sig"
+
+
+def scan_text_file(path, scan):
+    """Call scan with one streaming decoder, restarting on legacy encodings."""
+    encoding = text_encoding(path)
+    if encoding is None:
+        return None
+    errors = "strict" if encoding == "utf-8-sig" else "replace"
+    try:
+        with open(path, encoding=encoding, errors=errors) as stream:
+            return scan(stream)
+    except UnicodeDecodeError:
+        with open(path, encoding="gb18030", errors="replace") as stream:
+            return scan(stream)
+
+
+def escaped_binary_preview(path, limit=32 * 1024):
+    with open(path, "rb") as stream:
+        sample = stream.read(limit + 1)
+    lines = [f"二进制内容 · {Path(path).stat().st_size:,} 字节", ""]
+    for start in range(0, min(limit, len(sample)), 16):
+        row = sample[start : min(limit, start + 16)]
+        escaped = " ".join(f"\\x{value:02x}" for value in row)
+        printable = "".join(chr(value) if 32 <= value <= 126 else "." for value in row)
+        lines.append(f"{start:08X}  {escaped:<79}  |{printable}|")
+    if len(sample) > limit:
+        lines.extend(("", f"已显示前 {limit:,} 字节。"))
+    return "\n".join(lines)
+
+
 def read_text_file(path: str):
     """同时识别 UTF-8/UTF-16/GB18030；不要把 UTF-16 的 NUL 误当固件二进制。"""
     try:
-        with open(path, "rb") as f:
-            head = f.read(8192)
-        if not head:
-            return ""
-        if head.startswith((b"\xff\xfe", b"\xfe\xff")):
-            return Path(path).read_text(encoding="utf-16", errors="replace")
-        if b"\0" in head:
-            even = head[0::2].count(0)
-            odd = head[1::2].count(0)
-            if odd >= len(head) // 8 and even <= len(head) // 50:
-                return Path(path).read_text(encoding="utf-16-le", errors="replace")
-            if even >= len(head) // 8 and odd <= len(head) // 50:
-                return Path(path).read_text(encoding="utf-16-be", errors="replace")
+        encoding = text_encoding(path)
+        if encoding is None:
             return _extract_glasses_binary_metadata(path)
-        # UTF-8 first; GB18030 fallback if original bytes are not UTF-8.
+        if encoding != "utf-8-sig":
+            return Path(path).read_text(encoding=encoding, errors="replace")
         try:
-            with open(path, "r", encoding="utf-8-sig", errors="strict") as f:
-                return f.read()
+            return Path(path).read_text(encoding=encoding)
         except UnicodeDecodeError:
-            with open(path, "r", encoding="gb18030", errors="replace") as f:
-                return f.read()
+            return Path(path).read_text(encoding="gb18030", errors="replace")
     except (OSError, UnicodeError):
         return None

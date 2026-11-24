@@ -35,6 +35,33 @@ class GuiRegressionTests(GuiCase):
         self.win.resize(570, 500)
         self.app.processEvents()
         self.assertTrue(self.win.btn_decrypt.isVisible())
+        self.assertTrue(self.win.btn_new_note.isVisible())
+        toolbar = self.win.btn_decrypt.parent()
+        for button in (
+            self.win.btn_new_note,
+            self.win.btn_float_search,
+            self.win.btn_float_results,
+            self.win.btn_find,
+            self.win.btn_search,
+        ):
+            self.assertIs(button.parent(), toolbar)
+            self.assertTrue(
+                button.isVisible(),
+                f"{button.text()} is in toolbar overflow at {self.win.width()} px",
+            )
+        for widget in (
+            self.win.search_scope,
+            self.win.keyword_mode,
+            self.win.btn_next,
+            self.win.btn_filter,
+        ):
+            self.assertLessEqual(
+                abs(
+                    widget.geometry().center().y()
+                    - self.win.search_input.geometry().center().y()
+                ),
+                6,
+            )
         with patch(
             "rayneo.window.QDialog.exec", return_value=QDialog.DialogCode.Rejected
         ) as execute:

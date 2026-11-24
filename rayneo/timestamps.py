@@ -1,5 +1,6 @@
 import re
 from datetime import datetime
+from functools import lru_cache
 
 LOG_TIME_RE = re.compile(
     r"(?P<t>\d{4}[/-]\d{2}[/-]\d{2}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?)"
@@ -14,7 +15,11 @@ def parse_log_time(line: str):
     m = LOG_TIME_RE.search(head)
     if not m:
         return None
-    raw = m.group("t")
+    return _parse_timestamp(m.group("t"))
+
+
+@lru_cache(maxsize=4096)
+def _parse_timestamp(raw):
     try:
         y = int(raw[0:4])
         mo = int(raw[5:7])

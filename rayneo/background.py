@@ -7,10 +7,13 @@ from .ingestion import (
     _is_glasses_metadata_only,
     _stream_decode_path,
     _unique_path,
+    escaped_binary_preview,
     prepare_log_inputs,
     read_text_file,
+    text_encoding,
 )
-from .text import _line_offsets
+from .text import _line_offsets, file_revision
+from .large_log import LargeLogIndex, PAGED_FILE_BYTES
 
 
 class PreviewOpenThread(QThread):
@@ -31,10 +34,21 @@ class PreviewOpenThread(QThread):
                 cancel_callback=self.isInterruptionRequested,
             )
             valid = [p for p in paths if not _is_glasses_metadata_only(p)]
+            metadata = [p for p in paths if _is_glasses_metadata_only(p)]
+            auxiliary = list(metadata)
+            for path in valid:
+                if self.isInterruptionRequested():
+                    raise InterruptedError("已取消导入")
+                try:
+                    if text_encoding(path) is None:
+                        auxiliary.append(path)
+                except OSError:
+                    continue
             self.completed.emit(
                 {
                     "paths": valid,
-                    "metadata_paths": [p for p in paths if p not in valid],
+                    "metadata_paths": metadata,
+                    "auxiliary_paths": auxiliary,
                     "notes": notes,
                     "tempdir": tempdir,
                 }
@@ -50,18 +64,42 @@ class FileReadThread(QThread):
         super().__init__()
         self.path = path
         self.cached_text = cached_text
+        self.large_index = None
+        self.target_line = 0
 
     def run(self):
         try:
-            text = (
-                self.cached_text
-                if self.cached_text is not None
-                else read_text_file(self.path)
-            )
-            self.completed.emit(
-                self.path,
-                (text, _line_offsets(text)) if isinstance(text, str) else None,
-            )
+            revision = file_revision(self.path)
+            binary = text_encoding(self.path) is None
+            index = page = None
+            if binary:
+                text = escaped_binary_preview(self.path)
+            elif revision[2] >= PAGED_FILE_BYTES:
+                index = self.large_index
+                if index is None or index.revision != revision:
+                    index = LargeLogIndex.build(
+                        self.path, revision, self.isInterruptionRequested
+                    )
+                page = index.page(self.target_line)
+                text = page.text
+            elif self.cached_text is not None:
+                text = self.cached_text
+            else:
+                text = read_text_file(self.path)
+            payload = None
+            if isinstance(text, str):
+                offsets = _line_offsets(text)
+                payload = (
+                    text,
+                    offsets,
+                    revision
+                    if not binary and revision == file_revision(self.path)
+                    else None,
+                    binary,
+                    index,
+                    page,
+                )
+            self.completed.emit(self.path, payload)
         except Exception:
             self.completed.emit(self.path, None)
 

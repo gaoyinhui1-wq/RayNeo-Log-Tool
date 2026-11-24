@@ -33,6 +33,7 @@ DEVICE_FIELD_PATTERNS = {
         re.compile(r'\bphoneVersion\s*[:=]\s*["\']?([^,"\'}\]]+)', re.I),
         re.compile(r'\bsystemVersion\s*[:=]\s*["\']?([^,"\'}\]]+)', re.I),
         re.compile(r'\biosVersion\s*[:=]\s*["\']?([^,"\'}\]]+)', re.I),
+        re.compile(r"\bOS Version:\s*(?:iPhone OS|iOS)\s+([0-9]+(?:\.[0-9]+)+)", re.I),
         re.compile(r'\bandroidVersion\s*[:=]\s*["\']?([^,"\'}\]]+)', re.I),
         re.compile(
             r"\b(?:ro\.build\.version\.release|Android OS|Android Version)\s*[:= ]+([0-9][0-9A-Za-z._-]*)",
@@ -60,10 +61,13 @@ DEVICE_FIELD_PATTERNS = {
         re.compile(r"设备名:\s*([^|\r\n]+)", re.I),
     ],
     "眼镜SN": [
-        re.compile(r"\bSN:\s*([0-9A-Za-z_-]{6,})", re.I),
-        re.compile(r"\bmfiSerial\s*[:=]\s*([0-9A-Za-z_-]{6,})", re.I),
+        re.compile(
+            r'\b(?:mfiSerial|glassesSN|glassSerialNumber|wearableSN)["\']?\s*[:=]\s*["\']?([0-9A-Za-z_-]{6,})(?![\w*-])',
+            re.I,
+        ),
+        re.compile(r'\bSN\s*:\s*["\']?([0-9A-Za-z_-]{6,})(?![\w*-])', re.I),
         re.compile(r'["\']sn["\']\s*[:=]\s*["\']([0-9A-Za-z_-]{10,})', re.I),
-        re.compile(r"\bsn\s*[:=]\s*([0-9A-Za-z_-]{10,})", re.I),
+        re.compile(r"\bsn\s*[:=]\s*([0-9A-Za-z_-]{10,})(?![\w*-])", re.I),
     ],
     "眼镜系统版本": [
         re.compile(
@@ -106,6 +110,27 @@ DEVICE_FIELD_PATTERNS = {
         ),
     ],
 }
+
+DEVICE_SUMMARY_FIELDS = (
+    ("手机平台", "手机平台"),
+    ("手机型号", "手机型号"),
+    ("手机系统版本", "手机系统版本"),
+    ("App版本", "App版本"),
+    ("RayneoNet SDK", "RayNeoNet SDK"),
+    ("眼镜名称", "眼镜名称"),
+    ("眼镜SN", "眼镜SN"),
+    ("眼镜系统版本", "眼镜系统版本"),
+    ("眼镜日志解析", "眼镜日志解析"),
+)
+
+
+def device_summary_lines(info, show_unknown=False):
+    essential = {"眼镜SN", "App版本", "手机系统版本", "RayneoNet SDK", "眼镜系统版本"}
+    return [
+        f"{label}：{info.get(key) or '未知'}"
+        for key, label in DEVICE_SUMMARY_FIELDS
+        if info.get(key) or (show_unknown and key in essential)
+    ]
 
 
 def _clean_info_value(value: str) -> str:
@@ -359,6 +384,7 @@ def extract_device_info(files_content, reference_time=None):
     markers = {
         "手机型号": (
             "phoneModel",
+            "phone-model",
             "modelName",
             "iPhone",
             "Build.MODEL",
@@ -366,8 +392,10 @@ def extract_device_info(files_content, reference_time=None):
         ),
         "手机系统版本": (
             "phoneVersion",
+            "phone-os-version",
             "systemVersion",
             "iosVersion",
+            "OS Version:",
             "androidVersion",
             "harmonyVersion",
             "ohosVersion",
@@ -379,7 +407,17 @@ def extract_device_info(files_content, reference_time=None):
         "App版本": ("appVersionBuild", "app_full_version", "app-version", "appVersion"),
         "RayneoNet SDK": ("sdkVersion", "RayneoNet-v"),
         "眼镜名称": ("deviceName", "设备名:"),
-        "眼镜SN": ("mfiSerial", "SN:", '"SN"', '"sn"', " sn=", "sn="),
+        "眼镜SN": (
+            "mfiSerial",
+            "glassesSN",
+            "glassSerialNumber",
+            "wearableSN",
+            "SN:",
+            '"sn"',
+            "'sn'",
+            "sn=",
+            "sn =",
+        ),
         "眼镜系统版本": (
             "deviceRomVersion",
             "firmwareVersion",
@@ -411,6 +449,14 @@ def extract_device_info(files_content, reference_time=None):
 
     version_fields = {"手机系统版本", "App版本", "RayneoNet SDK", "眼镜系统版本"}
 
+    from .indexing import token_automaton
+
+    all_markers = tuple(
+        dict.fromkeys(
+            marker.lower() for values in markers.values() for marker in values
+        )
+    )
+    automaton = token_automaton(all_markers)
     for path, text in items:
         if not text:
             continue
@@ -418,10 +464,24 @@ def extract_device_info(files_content, reference_time=None):
         glass_side = _is_glasses_side_path(path) or _is_glasses_metadata_only(path)
         # 每个文件只做一次 lowercase，避免每个 marker 重复构造整份日志的小写副本。
         text_low = text.lower()
+        present = None
+        if automaton is not None:
+            present = set()
+            for count, (end, size) in enumerate(automaton.iter(text_low)):
+                if count == 2048:
+                    # Dense logs can be cheaper to search using the existing
+                    # bounded per-field lookups.
+                    present = None
+                    break
+                present.add(text_low[end - size + 1 : end + 1])
         for field in fields:
-            if glass_side and field != "眼镜系统版本":
+            if glass_side and field not in {"眼镜SN", "眼镜名称", "眼镜系统版本"}:
                 continue
             patterns = list(DEVICE_FIELD_PATTERNS.get(field, []))
+            if glass_side and field == "眼镜系统版本":
+                patterns.append(
+                    re.compile(r"\b(Strix OS\s+[0-9]+(?:\.[0-9]+){2,})", re.I)
+                )
             if not patterns:
                 continue
             priority = _device_field_source_priority(field, path)
@@ -431,6 +491,8 @@ def extract_device_info(files_content, reference_time=None):
             reverse_scan = field in version_fields
             for marker in markers[field]:
                 marker_low = marker.lower()
+                if present is not None and marker_low not in present:
+                    continue
                 if reverse_scan:
                     end_pos = len(text_low)
                     while hit_count < max_hits:
