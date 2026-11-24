@@ -521,6 +521,7 @@ class AppWindow(QMainWindow):
         self.vsplit.addWidget(container)
 
         self.results = QTabWidget(self.vsplit)
+        self._timing_pane_height = None
         self.results.setObjectName("BottomTabs")
         self.txt_analysis = QPlainTextEdit()
         self.txt_analysis.setObjectName("ReportView")
@@ -598,6 +599,8 @@ class AppWindow(QMainWindow):
         self.vsplit.setStretchFactor(0, 4)
         self.vsplit.setStretchFactor(1, 1)
         self.vsplit.setSizes([560, 108])
+        self.vsplit.splitterMoved.connect(self._timing_splitter_moved)
+        self.results.currentChanged.connect(self._update_timing_pane_size)
         rl.addWidget(self.vsplit, 1)
         self.hsplit.addWidget(right)
         self.hsplit.setStretchFactor(0, 0)
@@ -991,6 +994,7 @@ class AppWindow(QMainWindow):
             self.vsplit.addWidget(self.results)
             self.results.show()
             self.vsplit.setSizes(sizes)
+            self._update_timing_pane_size()
             bar.setValue(old_top)
             dialog.deleteLater()
 
@@ -1286,6 +1290,25 @@ class AppWindow(QMainWindow):
     def show_connection_timings(self):
         self.results.show()
         self.results.setCurrentWidget(self.connection_timings)
+        self._update_timing_pane_size()
+
+    def _update_timing_pane_size(self, *_):
+        if self.vsplit.indexOf(self.results) < 0 or self.results.isHidden():
+            return
+        viewer_height, results_height = self.vsplit.sizes()
+        total = viewer_height + results_height
+        if self.results.currentWidget() is self.connection_timings:
+            target = min(174, total // 2)
+            if results_height < target and self._timing_pane_height is None:
+                self._timing_pane_height = results_height
+                self.vsplit.setSizes([total - target, target])
+        elif self._timing_pane_height is not None:
+            original = self._timing_pane_height
+            self._timing_pane_height = None
+            self.vsplit.setSizes([total - original, original])
+
+    def _timing_splitter_moved(self, *_):
+        self._timing_pane_height = None
 
     def start_connection_timings(self):
         if self._busy():
@@ -1892,6 +1915,7 @@ class AppWindow(QMainWindow):
 
     def toggle_results(self):
         self.results.setVisible(not self.results.isVisible())
+        self._update_timing_pane_size()
 
     def open_decrypt_dialog(self):
         # A single dialog; selected local source and output never leave the computer.

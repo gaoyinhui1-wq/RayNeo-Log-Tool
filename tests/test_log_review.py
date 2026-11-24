@@ -258,6 +258,9 @@ class ReviewUiTests(GuiCase):
             encoding="utf-8",
         )
         self.load(source)
+        total_height = sum(self.win.vsplit.sizes())
+        self.win.vsplit.setSizes([total_height - 92, 92])
+        previous_height = self.win.vsplit.sizes()[1]
         self.win.show_connection_timings()
         panel = self.win.connection_timings
         panel.scan.click()
@@ -265,10 +268,15 @@ class ReviewUiTests(GuiCase):
         self.assertIs(self.win.results.currentWidget(), panel)
         self.assertFalse(self.win.has_analyzed)
         self.assertEqual(panel.model.data(panel.model.index(0, 3)), "0.280 秒")
+        self.assertGreaterEqual(
+            panel.table.viewport().height(), panel.table.rowHeight(0)
+        )
         panel.table.activated.emit(panel.model.index(0, 5))
         self.assertEqual(self.win.viewer.current_line_col()[0], 2)
         panel.table.activated.emit(panel.model.index(0, 4))
         self.assertEqual(self.win.viewer.current_line_col()[0], 1)
+        self.win.results.setCurrentWidget(self.win.txt_analysis)
+        self.assertEqual(self.win.vsplit.sizes()[1], previous_height)
         self.load(source)
         self.assertEqual(panel.model.rowCount(), 0)
 
