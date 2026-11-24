@@ -12,6 +12,13 @@ from rayneo.text import file_revision
 
 
 class LogEditTests(unittest.TestCase):
+    def test_deletion_between_different_newlines_keeps_two_breaks(self):
+        with TemporaryDirectory() as folder:
+            source = Path(folder) / "mixed.log"
+            source.write_bytes(b"a\rb\nc")
+            save_log_edit(source, source, file_revision(source), 2, "b", "")
+            self.assertEqual(source.read_text(encoding="utf-8"), "a\n\nc")
+
     def test_bounded_splice_preserves_utf16_bom_and_surrounding_newlines(self):
         with TemporaryDirectory() as folder:
             source = Path(folder) / "unicode.log"

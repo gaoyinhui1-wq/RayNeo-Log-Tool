@@ -54,9 +54,21 @@ def _write_splice(source, output, start, expected, replacement):
     end = start + len(expected)
     newline = None
     inserted = False
+    previous_tail = ""
+
+    def write(piece):
+        nonlocal previous_tail
+        if piece:
+            # Two existing line breaks can meet after a deletion. Keep a
+            # lone CR and the following LF from turning into one break.
+            if previous_tail == "\r" and piece.startswith("\n"):
+                output.write("\r")
+            output.write(piece)
+            previous_tail = piece[-1]
+
     for raw in _raw_chunks(source):
         if inserted and position >= end:
-            output.write(raw)
+            write(raw)
             continue
         normalized = raw.replace("\r\n", "\n").replace("\r", "\n")
         if newline is None:
@@ -64,20 +76,20 @@ def _write_splice(source, output, start, expected, replacement):
             newline = match[0] if match else None
         next_position = position + len(normalized)
         if next_position <= start:
-            output.write(raw)
+            write(raw)
         else:
             left = max(0, start - position)
             right = min(len(normalized), end - position)
             if not inserted:
-                output.write(raw[: _raw_offset(raw, left)])
-                output.write(replacement.replace("\n", newline or "\n"))
+                write(raw[: _raw_offset(raw, left)])
+                write(replacement.replace("\n", newline or "\n"))
                 inserted = True
             removed.append(normalized[left:right])
             if next_position >= end:
-                output.write(raw[_raw_offset(raw, right) :])
+                write(raw[_raw_offset(raw, right) :])
         position = next_position
     if not inserted and position == start == end:
-        output.write(replacement.replace("\n", newline or "\n"))
+        write(replacement.replace("\n", newline or "\n"))
         inserted = True
     if not inserted or position < end or "".join(removed) != expected:
         raise ValueError("日志内容已改变，请重新打开后编辑")
