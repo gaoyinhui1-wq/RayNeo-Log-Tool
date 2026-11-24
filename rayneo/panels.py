@@ -93,7 +93,7 @@ class ConnectionTimingPanel(QWidget):
         layout.setSpacing(0)
         controls = QHBoxLayout()
         controls.setContentsMargins(4, 2, 4, 2)
-        self.scan = QPushButton("计算耗时")
+        self.scan = QPushButton("重新读取")
         self.steps = QPushButton("查看过程")
         self.steps.setEnabled(False)
         self.steps.clicked.connect(self.show_process)

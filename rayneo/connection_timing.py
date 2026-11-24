@@ -403,66 +403,42 @@ def _file_timings(stream, path, parse_time):
     return attempts.finish()
 
 
-def connection_process_text(attempts, items):
-    if not attempts:
-        return ""
-    relevant = {(item["full_path"], item["line"]) for item in items}
+class TimingResults:
+    def __init__(self):
+        self.rows = []
+        self.total = 0
 
-    def rank(row):
-        if any((event["path"], event["line"]) in relevant for event in row["steps"]):
-            priority = 2
-        else:
-            priority = int(row["status"] in {"失败", "失败／超时"})
-        return priority, row["start"]["time"]
+    def add(self, result):
+        current, count = result
+        self.total += count
+        self.rows.extend(current)
+        self.rows.sort(
+            key=lambda row: (
+                row["start"]["time"],
+                row["start"]["path"],
+                row["start"]["line"],
+            ),
+            reverse=True,
+        )
+        del self.rows[MAX_ROWS:]
 
-    picked = sorted(
-        sorted(attempts, key=rank, reverse=True)[:2],
-        key=lambda row: row["start"]["time"],
-    )
-    lines = ["配对／回连过程"]
-    for row in picked:
-        steps = row["steps"]
-        process = ["配对" if row["kind"] == "pair" else "回连"]
-        process.append(
-            f"{steps[0]['time']:%m-%d} {event_time_text(steps[0])} {steps[0]['text']}"
-        )
-        for previous, event in zip(steps, steps[1:]):
-            process.append(f"{event['text']}（+{duration_text(previous, event)}）")
-        end = row["end"]
-        result = (
-            f"{row['status']}，共 {duration_text(row['start'], end)}"
-            if end
-            else row["status"]
-        )
-        lines.append(" → ".join(process) + f"。{result}。")
-    return "\n".join(lines)
+    def result(self, errors):
+        return {"rows": self.rows, "total": self.total, "errors": errors}
 
 
 def read_connection_timings(paths, progress):
-    rows, errors = [], []
-    total = 0
+    results = TimingResults()
+    errors = []
     for i, path in enumerate(paths):
         progress(i, len(paths), Path(path).name)
         try:
             parse_time = trace_time_parser(path)
             found = scan_text_file(
-                path,
-                lambda stream: _file_timings(stream, path, parse_time),
+                path, lambda stream: _file_timings(stream, path, parse_time)
             )
         except OSError as exc:
             errors.append(f"{Path(path).name}：{exc}")
             continue
         if found:
-            current, count = found
-            total += count
-            rows.extend(current)
-            rows.sort(
-                key=lambda row: (
-                    row["start"]["time"],
-                    row["start"]["path"],
-                    row["start"]["line"],
-                ),
-                reverse=True,
-            )
-            del rows[MAX_ROWS:]
-    return {"rows": rows, "total": total, "errors": errors}
+            results.add(found)
+    return results.result(errors)

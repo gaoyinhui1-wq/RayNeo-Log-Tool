@@ -18,6 +18,11 @@ from .link_diagnostics import (
     _device,
 )
 from .log_scan import candidate_lines, trace_time_parser
+from .notification_events import (
+    EXPECTED_SKIP,
+    notification_header,
+    notification_payload,
+)
 from .notification_path import FALSE_STATUS, GLASSES_FAILURE, GLASSES_OK, GLASSES_SCOPE
 from .records import RSSI_RE
 
@@ -63,6 +68,12 @@ MESSAGE_FIELDS = re.compile(
     r"""(?=\s*(?:[,|}\]]|$|\b\w{2,35}["']?\s*[:=]))""",
     re.I,
 )
+
+
+def is_notification_line(line, lower):
+    return (
+        "ancs" in lower or "notification" in lower or "通知" in line or "上镜" in line
+    )
 
 
 def _source_device(line):
@@ -143,119 +154,206 @@ def _remember(cache, key, value, limit):
     return None
 
 
-def scan_samples(stream, path, parse_time):
-    rows = {kind: deque(maxlen=SAMPLE_LIMIT) for kind in KINDS}
-    counts, signals, directions = Counter(), Counter(), Counter()
-    payloads, delivered = OrderedDict(), OrderedDict()
-    glasses_file = _is_glasses_side_path(path)
+def _metadata(line, payload):
+    if payload:
 
-    def append(kind, item):
-        rows[kind].append(item)
-        counts[kind] += 1
+        def value(*keys):
+            return next(
+                (
+                    str(payload[key])[:500]
+                    for key in keys
+                    if isinstance(payload.get(key), (str, int)) and str(payload[key])
+                ),
+                "",
+            )
 
-    for number, line in candidate_lines(stream, MARKERS):
-        if PAYLOAD.search(line):
-            continue
-        signal, rate = _signal(line), _rate(line)
-        ancs = ANCS_SCOPE.search(line)
-        glasses = GLASSES_SCOPE.search(line) or glasses_file
-        notify = (
-            ancs
-            or NOTIFY_SCOPE.search(line)
-            or GLASSES_SCOPE.search(line)
-            or (glasses_file and ("通知" in line or "notification" in line.lower()))
+        return (
+            value("appName", "displayName", "appId"),
+            value("title"),
+            value("content", "message", "body"),
+            value("appId", "bundleId", "appIdentifier"),
         )
+    fields = [*_notification_fields(line[:3000]), ""]
+    return tuple(fields)
+
+
+def _near(time, number, previous):
+    old_time, old_number = previous
+    return (
+        0 <= (time - old_time).total_seconds() <= 120
+        if time and old_time
+        else 0 <= number - old_number <= 150
+    )
+
+
+class SampleScan:
+    def __init__(self, path):
+        self.path = path
+        self.rows = {kind: deque(maxlen=SAMPLE_LIMIT) for kind in KINDS}
+        self.counts, self.signals, self.directions = Counter(), Counter(), Counter()
+        self.payloads, self.delivered = OrderedDict(), OrderedDict()
+        self.glasses_file = _is_glasses_side_path(path)
+
+    def append(self, kind, item):
+        self.rows[kind].append(item)
+        self.counts[kind] += 1
+
+    def observe(self, number, line, time, lower, event=None):
+        notify = is_notification_line(line, lower)
+        if event is None:
+            event = notification_header(line) if notify else line
+        signal = _signal(event) if "rssi" in lower else None
+        rate = _rate(event) if "channelrate" in lower else None
         if not (signal or rate or notify):
-            continue
-        time = parse_time(line)
+            return
         timestamp = time.isoformat(sep=" ") if time else ""
-        location = (timestamp, path, number)
-        preview = line[:480]
+        position = (timestamp, self.path, number)
+        preview = line[:240]
         if signal:
-            signals[signal[1]] += 1
-            append("signal", (*location, signal, preview))
+            self.signals[signal[1]] += 1
+            self.append("signal", (*position, signal, preview))
         if rate:
-            directions[rate[2]] += 1
-            append("rate", (*location, rate, preview))
+            self.directions[rate[2]] += 1
+            self.append("rate", (*position, rate, preview))
         if not notify:
-            continue
-        fields_start = MESSAGE_FIELDS.search(line[:3000])
-        event = line[: fields_start.start()] if fields_start else line
+            return
+
+        ancs = ANCS_SCOPE.search(event)
+        glass_component = (
+            GLASSES_SCOPE.search(event)
+            or "ancsadapter::onnotificationcomplete" in lower
+        )
+        glasses = glass_component or self.glasses_file
+        if not (
+            ancs or NOTIFY_SCOPE.search(event) or glass_component or self.glasses_file
+        ):
+            return
         if (
             NORMAL_NOTIFY.search(event)
+            or EXPECTED_SKIP.search(event)
             or FALSE_STATUS.search(event)
             or GLASSES_FAILURE.search(event)
             or NOTIFY_FAILURE.search(event)
         ):
-            continue
-        identity = MESSAGE_ID.search(line)
-        message_id = identity[1] if identity else ""
-        device = _source_device(line)
-        key = (device, "ANCS" if ancs else "", message_id)
-        fields = _notification_fields(line[:3000])
+            return
+        payload = notification_payload(line)
+        identity = MESSAGE_ID.search(event)
+        message_id = (
+            str(payload.get("notificationUID", payload.get("notificationId")))
+            if payload
+            else (identity[1] if identity else "")
+        )
+        device = _source_device(event)
+        channel = "ANCS" if ancs else "通知转发"
+        key = (device, channel, message_id)
+        fields = _metadata(line, payload)
         if message_id:
-            earlier = payloads.get(key)
-            if earlier:
-                old_time, old_line, old_fields = earlier
-                nearby = (
-                    0 <= (time - old_time).total_seconds() <= 120
-                    if time and old_time
-                    else number - old_line <= 150
-                )
-                if nearby:
-                    fields = [new or old for new, old in zip(fields, old_fields)]
+            earlier = self.payloads.get(key)
+            if earlier and _near(time, number, earlier[:2]):
+                fields = tuple(new or old for new, old in zip(fields, earlier[2]))
             if any(fields):
-                _remember(payloads, key, (time, number, fields), 2048)
+                _remember(self.payloads, key, (time, number, fields), 2048)
 
         shown = (glasses and GLASSES_OK.search(event)) or ON_GLASSES.search(event)
-        received = GLASSES_ACK.search(event) or (
-            glasses
-            and (
-                RECEIVED.search(event)
-                or (ancs and any(fields) and ANCS_PAYLOAD.search(line))
+        completed = bool(
+            payload and "ancsadapter::onnotificationcomplete" in event.lower()
+        )
+        received = (
+            completed
+            or GLASSES_ACK.search(event)
+            or (
+                glasses
+                and (
+                    RECEIVED.search(event)
+                    or (ancs and any(fields) and ANCS_PAYLOAD.search(event))
+                )
             )
         )
         if not (shown or received):
-            continue
+            return
         status = "已上镜" if shown else "眼镜已接收"
-        item = (
-            *location,
-            (status, "ANCS" if ancs else "通知转发", message_id, *fields),
-            preview,
-        )
+        item = (*position, (status, channel, message_id, *fields), preview)
         if message_id:
-            previous = delivered.get(key)
+            previous = self.delivered.get(key)
             if previous:
                 previous_time, previous_item = previous
-                _, _, previous_number, previous_values, _ = previous_item
-                nearby = (
-                    0 <= (time - previous_time).total_seconds() <= 120
-                    if time and previous_time
-                    else number - previous_number <= 150
-                )
-                if nearby and previous_values[0] == "已上镜" and not shown:
-                    continue
+                nearby = _near(time, number, (previous_time, previous_item[2]))
+                if nearby and (previous_item[3][0] == "已上镜" or not shown):
+                    return
                 if not nearby:
-                    append("mirrored", delivered.pop(key)[1])
-            evicted = _remember(delivered, key, (time, item), 2048)
+                    self.append("mirrored", self.delivered.pop(key)[1])
+            evicted = _remember(self.delivered, key, (time, item), 2048)
             if evicted:
-                append("mirrored", evicted[1])
+                self.append("mirrored", evicted[1])
         else:
-            append("mirrored", item)
+            self.append("mirrored", item)
 
-    for _, item in delivered.values():
-        append("mirrored", item)
-    return rows, counts, signals, directions
+    def finish(self):
+        for _, item in self.delivered.values():
+            self.append("mirrored", item)
+        return self.rows, self.counts, self.signals, self.directions
+
+
+def scan_samples(stream, path, parse_time):
+    samples = SampleScan(path)
+    for number, line in candidate_lines(stream, MARKERS):
+        lower = line.lower()
+        event = notification_header(line) if is_notification_line(line, lower) else line
+        if not PAYLOAD.search(event):
+            samples.observe(number, line, parse_time(line), lower, event)
+    return samples.finish()
+
+
+class SampleResults:
+    def __init__(self):
+        self.rows = {kind: [] for kind in KINDS}
+        self.counts, self.signals, self.directions = Counter(), Counter(), Counter()
+
+    def add(self, result):
+        file_rows, counts, signals, directions = result
+        self.counts.update(counts)
+        self.signals.update(signals)
+        self.directions.update(directions)
+
+        def timestamp(row):
+            return row[:3]
+
+        for kind, current in file_rows.items():
+            if current:
+                ordered = sorted(current, key=timestamp, reverse=True)
+                self.rows[kind] = list(
+                    islice(
+                        merge(self.rows[kind], ordered, key=timestamp, reverse=True),
+                        SAMPLE_LIMIT,
+                    )
+                )
+
+    def result(self, errors):
+        signal_count = self.counts["signal"]
+        summary = {
+            "signal": "",
+            "rate": f"TX {self.directions['TX']:,} · RX {self.directions['RX']:,}",
+            "mirrored": "双击核对通知来源和日志阶段",
+        }
+        if signal_count:
+            average = (
+                sum(value * count for value, count in self.signals.items())
+                / signal_count
+            )
+            summary["signal"] = (
+                f"{min(self.signals)} 到 {max(self.signals)} dBm · 均值 {average:.1f} dBm"
+            )
+        return {
+            "rows": self.rows,
+            "counts": self.counts,
+            "summary": summary,
+            "errors": errors,
+        }
 
 
 def read_bluetooth_samples(paths, progress):
-    rows = {kind: [] for kind in KINDS}
-    counts, signals, directions = Counter(), Counter(), Counter()
+    results = SampleResults()
     errors = []
-
-    def timestamp(row):
-        return row[:3]
-
     for index, path in enumerate(paths):
         progress(index, len(paths), Path(path).name)
         try:
@@ -266,29 +364,6 @@ def read_bluetooth_samples(paths, progress):
         except OSError as exc:
             errors.append(f"{Path(path).name}：{exc}")
             continue
-        if result is None:
-            continue
-        file_rows, file_counts, file_signals, file_directions = result
-        counts.update(file_counts)
-        signals.update(file_signals)
-        directions.update(file_directions)
-        for kind, current in file_rows.items():
-            if current:
-                ordered = sorted(current, key=timestamp, reverse=True)
-                rows[kind] = list(
-                    islice(
-                        merge(rows[kind], ordered, key=timestamp, reverse=True),
-                        SAMPLE_LIMIT,
-                    )
-                )
-    signal_count = counts["signal"]
-    summary = {
-        "rate": f"TX {directions['TX']:,} · RX {directions['RX']:,}",
-        "mirrored": "双击可核对眼镜回执或显示原文",
-    }
-    if signal_count:
-        average = sum(value * count for value, count in signals.items()) / signal_count
-        summary["signal"] = (
-            f"{min(signals)} 到 {max(signals)} dBm · 均值 {average:.1f} dBm"
-        )
-    return {"rows": rows, "counts": counts, "summary": summary, "errors": errors}
+        if result is not None:
+            results.add(result)
+    return results.result(errors)

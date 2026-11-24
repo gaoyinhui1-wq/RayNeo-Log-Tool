@@ -47,7 +47,8 @@ SPP_FAILURE = re.compile(
     re.I,
 )
 ANCS_SCOPE = re.compile(
-    r"\bANCS(?:Status|State)?\b|7905f431-b5ce-4e99-a40f-4b1e122d00d0", re.I
+    r"\bANCS(?:Status|State|Adapter)?\b|\b(?:on|handle)ANCS\w+\b|\bNOTIFICATION_MSG_TYPE_SEND_ANCS\b|7905f431-b5ce-4e99-a40f-4b1e122d00d0",
+    re.I,
 )
 NOTIFY_SCOPE = re.compile(
     r"NotificationSync|RNNotification|mirrorNotification|通知同步|手机通知|NotificationListenerService|shareSystemNotifications",

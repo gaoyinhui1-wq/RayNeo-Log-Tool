@@ -263,6 +263,40 @@ class ConnectionTimingTests(TestCase):
 
 
 class BluetoothSampleTests(TestCase):
+    def test_glasses_native_ancs_json_surfaces_app_and_source_without_fake_anomaly(
+        self,
+    ):
+        with TemporaryDirectory() as folder:
+            source = Path(folder) / "syslog.0.lz4.unpacked"
+            prefix = "[2026/11/24 03:47:19.387800] [106] [ap] [APP_INFO] "
+            payload = '{"type":1,"notificationUID":"1462","appId":"com.example.app","appName":"测试应用","title":"示例","content":"原文提到 Bluetooth stack crashed、response body: timeout=false","timestamp":"20261124T114720"}'
+            source.write_text(
+                prefix
+                + "[ANCSAdapter.cpp:470] ANCSAdapter::onANCSDataSourceCallback, length=25\n"
+                + prefix
+                + "[ANCSAdapter.cpp:1042] ANCSAdapter::onNotificationComplete, notification: "
+                + payload
+                + "\n"
+                + prefix
+                + "[NotificationMessageProcessor.cpp:484] NotificationMessageProcessor::sendMessage type:NOTIFICATION_MSG_TYPE_SEND_ANCS, message:"
+                + payload
+                + ", len:0\n"
+                + prefix
+                + "[NotificationMessageHandler.cpp:44] NotificationMessageHandler::handleMessage 7\n",
+                encoding="utf-8",
+            )
+            result = read_bluetooth_samples([str(source)], lambda *_: None)
+            self.assertEqual(result["counts"]["mirrored"], 1)
+            stamp, _, line, values, _ = result["rows"]["mirrored"][0]
+            self.assertEqual(stamp, "2026-11-24 03:47:19.387800")
+            self.assertEqual(line, 1)
+            self.assertEqual(
+                values[:5], ("眼镜已接收", "ANCS", "1462", "测试应用", "示例")
+            )
+            self.assertEqual(values[-1], "com.example.app")
+            self.assertIn("response body:", values[5])
+            self.assertEqual(scan_causes(str(source), ()), [])
+
     def test_samples_take_real_link_values_and_ignore_wifi_and_failed_rssi(self):
         with TemporaryDirectory() as folder:
             source = Path(folder) / "native_ios_2026_05_01.log"
@@ -309,11 +343,11 @@ class BluetoothSampleTests(TestCase):
             result = read_bluetooth_samples([str(phone), str(glasses)], lambda *_: None)
             rows = result["rows"]["mirrored"]
             self.assertEqual(result["counts"]["mirrored"], 3)
-            self.assertEqual(rows[0][3], ("眼镜已接收", "ANCS", "0x1a", "", "", ""))
+            self.assertEqual(rows[0][3], ("眼镜已接收", "ANCS", "0x1a", "", "", "", ""))
             self.assertEqual(rows[1][2], 1)
             self.assertEqual(
                 rows[1][3],
-                ("已上镜", "ANCS", "0x1a", "com.demo", "测试, 消息", "Pay: 1,2"),
+                ("已上镜", "ANCS", "0x1a", "com.demo", "测试, 消息", "Pay: 1,2", ""),
             )
             self.assertEqual(rows[2][3][0], "眼镜已接收")
 
@@ -350,10 +384,11 @@ class ReviewUiTests(GuiCase):
         self.assertEqual(self.win.viewer.current_line_col()[0], 1)
         self.win.results.setCurrentWidget(self.win.txt_analysis)
         self.assertEqual(self.win.vsplit.sizes()[1], previous_height)
+        source.write_text("2026-05-01 10:00:00 other log\n", encoding="utf-8")
         self.load(source)
         self.assertEqual(panel.model.rowCount(), 0)
 
-    def test_process_shows_exact_intervals_in_timing_and_analysis(self):
+    def test_exact_steps_are_available_in_timing_table_only(self):
         source = self.root / "reconnect.log"
         source.write_text(
             "2026-05-01 10:00:00.120005 auto reconnect trigger deviceId=aa\n"
@@ -384,9 +419,8 @@ class ReviewUiTests(GuiCase):
         self.win.reanalyze()
         self.wait(lambda: not self.win._busy() and self.win.has_analyzed)
         report = self.win.txt_analysis.toPlainText()
-        self.assertIn("配对／回连过程", report)
-        self.assertIn("RNLink 鉴权完成（+1.074510 秒）", report)
-        self.assertIn("成功，共 2.305015 秒", report)
+        self.assertNotIn("配对／回连过程", report)
+        self.assertEqual(panel.model.rowCount(), 1)
 
     def test_sample_tabs_load_in_one_job_and_navigate_then_clear_on_new_input(self):
         source = self.root / "system.log"
@@ -406,7 +440,6 @@ class ReviewUiTests(GuiCase):
             ["信号强度", "蓝牙速率", "上镜消息"],
         )
         self.win.results.setCurrentWidget(panels["signal"])
-        panels["signal"].scan.click()
         self.wait(
             lambda: (
                 not self.win._busy()
@@ -420,8 +453,44 @@ class ReviewUiTests(GuiCase):
         self.assertGreaterEqual(msg.table.viewport().height(), msg.table.rowHeight(0))
         msg.table.activated.emit(msg.model.index(0, 6))
         self.assertEqual(self.win.viewer.current_line_col()[0], 3)
+        source.write_text("2026-05-01 08:00:03 other log\n", encoding="utf-8")
         self.load(source)
         self.assertTrue(all(panel.model.rowCount() == 0 for panel in panels.values()))
+
+    def test_notification_only_auto_analysis_reports_native_failures_and_fills_tabs(
+        self,
+    ):
+        source = self.root / "syslog.log"
+        source.write_text(
+            "[2026/11/24 03:47:00.000000] [APP_ERROR] ANCSAdapter::setNotify DataSource CCCD write failed errorCode=5\n"
+            "[2026/11/24 03:47:01.000000] [APP_ERROR] ANCSAdapter::onANCSDataSourceCallback malformed payload notificationUID=18\n"
+            "[2026/11/24 03:47:02.000000] [APP_ERROR] NotificationMessageProcessor::sendMessage type:NOTIFICATION_MSG_TYPE_SEND_ANCS queue full, ret=-12, notificationUID=19\n"
+            "[2026/11/24 03:47:03.000000] [APP_ERROR] NotificationMessageHandler::handleAncsNotificationReceived missing notificationUID\n"
+            "[2026/11/24 03:47:04.000000] [APP_ERROR] GlassesNotificationManager::displayNotification failed notificationUID=20\n"
+            '[2026/11/24 03:47:05.000000] [APP_INFO] ANCSAdapter::onNotificationComplete, notification: {"notificationUID":"18","appId":"com.demo.x","appName":"测试","title":"已恢复"}\n'
+            "[2026/11/24 03:47:06.000000] HCI Hardware Error event code=0x03\n"
+            "[2026/11/24 03:47:08.000000] BLE RSSI=-56\n",
+            encoding="utf-8",
+        )
+        self.win.chk_auto_analyze.setChecked(True)
+        self.win.combo_mode.setCurrentText("通知异常")
+        self.load(source)
+        self.assertTrue(self.win.has_analyzed)
+        codes = {item["rule_id"] for item in self.win.incidents}
+        self.assertEqual(
+            codes,
+            {
+                "ancs",
+                "notification_handoff",
+                "notification_receive",
+                "notification_display",
+            },
+        )
+        self.assertEqual(self.win.sample_panels["mirrored"].model.rowCount(), 1)
+        self.assertEqual(self.win.sample_panels["signal"].model.rowCount(), 1)
+        report = self.win.txt_analysis.toPlainText()
+        self.assertIn("转交应用或主线程失败", report)
+        self.assertNotIn("硬件故障", report)
 
     def test_timeline_is_identical_in_viewer_copy_and_export(self):
         source = self.root / "combined.log"

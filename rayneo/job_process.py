@@ -307,6 +307,7 @@ def serve(directory):
     fingerprint = None
     diagnosis_signature = None
     diagnosis_cache = {}
+    table_signature = None
 
     def send(kind, **data):
         print(
@@ -314,6 +315,34 @@ def serve(directory):
             flush=True,
             file=output_stream,
         )
+
+    def source_signature(paths):
+        from .text import file_revision
+
+        stamps = []
+        for path in paths:
+            try:
+                stamp = file_revision(path)
+            except OSError:
+                stamp = None
+            stamps.append((path, stamp))
+        return tuple(stamps)
+
+    def progress_callback(verb):
+        last_update = 0.0
+
+        def update(index, count, name):
+            nonlocal last_update
+            now = time.monotonic()
+            if now - last_update >= 0.15:
+                last_update = now
+                send(
+                    "progress",
+                    value=10 + int(85 * (index - 1) / count),
+                    message=f"{verb} {name}（{index}/{count}）",
+                )
+
+        return update
 
     root = Path(directory)
     input_stream = (root / "request.jsonl").open("rb")
@@ -335,31 +364,18 @@ def serve(directory):
                 from .log_scan import read_versions
 
                 send("result", data={"device_info": read_versions(request["paths"])})
-            elif operation in {"connection_timings", "bluetooth_samples"}:
-                if operation == "connection_timings":
-                    from .connection_timing import read_connection_timings as read
-                else:
-                    from .bluetooth_samples import read_bluetooth_samples as read
+            elif operation == "log_tables":
+                from .log_tables import read_log_tables
 
-                last_progress = 0.0
-
-                def report_progress(index, count, name):
-                    nonlocal last_progress
-                    now = time.monotonic()
-                    if now - last_progress >= 0.15:
-                        last_progress = now
-                        send(
-                            "progress",
-                            value=10 + int(85 * index / count),
-                            message=f"扫描 {name}（{index + 1}/{count}）",
-                        )
-
-                send("result", data=read(request["paths"], report_progress))
+                paths = request["paths"]
+                signature = source_signature(paths)
+                tables = read_log_tables(paths, progress_callback("读取日志"))
+                table_signature = signature
+                send("result", data={"tables": tables})
             elif operation == "diagnose":
                 from . import rules
                 from .diagnosis import analysis_windows, diagnose, diagnosis_report
-                from .connection_timing import connection_process_text
-                from .text import file_revision
+                from .log_tables import LogTables, read_log_tables
 
                 started = time.monotonic()
                 rules.RULES_PATH = Path(request["rules_path"])
@@ -369,13 +385,7 @@ def serve(directory):
                     send("result", data={"error": f"异常规则文件错误：{exc}"})
                     continue
                 paths = list(dict.fromkeys(request["paths"]))
-                stamps = []
-                for path in paths:
-                    try:
-                        stamps.append((path, file_revision(path)))
-                    except OSError:
-                        stamps.append((path, None))
-                signature = tuple(stamps)
+                signature = source_signature(paths)
                 changed = (
                     diagnosis_signature is not None and diagnosis_signature != signature
                 )
@@ -391,46 +401,52 @@ def serve(directory):
                 )
                 auxiliary = set(request.get("auxiliary_paths", ()))
                 log_paths = [path for path in paths if path not in auxiliary]
-                key = windows, rules.RULES_SIGNATURE, tuple(log_paths)
+                log_signature = tuple(
+                    entry for entry in signature if entry[0] not in auxiliary
+                )
+                notification_only = request["analysis_mode"] == "通知异常"
+                key = (
+                    windows,
+                    rules.RULES_SIGNATURE,
+                    tuple(log_paths),
+                    notification_only,
+                )
+                refresh_tables = (
+                    request.get("refresh_tables") or table_signature != log_signature
+                )
+                table_data = None
                 cached = diagnosis_cache.get(key)
                 if cached is None:
-                    last_update = 0.0
-
-                    def progress(index, count, name):
-                        nonlocal last_update
-                        now = time.monotonic()
-                        if now - last_update >= 0.15:
-                            send(
-                                "progress",
-                                value=10 + int(85 * (index - 1) / count),
-                                message=f"分析 {name}（{index}/{count}）",
-                            )
-                            last_update = now
-
                     locations = []
-                    timing_rows = []
+                    tables = LogTables() if refresh_tables else None
                     conclusions, errors, trace = diagnose(
                         log_paths,
                         windows,
                         rules.DISABLED_RULE_NAMES,
-                        progress,
+                        progress_callback("分析"),
                         rules.EXTERNAL_RULES,
                         locations=locations,
-                        timing_rows=timing_rows,
+                        log_tables=tables,
+                        notification_only=notification_only,
                     )
-                    cached = conclusions, locations, errors, trace, timing_rows
+                    if tables is not None:
+                        table_data = tables.result(errors)
+                    cached = conclusions, locations, errors, trace
                     if len(diagnosis_cache) >= 8:
                         diagnosis_cache.pop(next(iter(diagnosis_cache)))
                     diagnosis_cache[key] = cached
                     reused = False
                 else:
                     reused = True
-                conclusions, locations, errors, link_trace, timing_rows = cached
+                if refresh_tables:
+                    if table_data is None:
+                        table_data = read_log_tables(
+                            log_paths, progress_callback("读取日志")
+                        )
+                    table_signature = log_signature
+                conclusions, locations, errors, link_trace = cached
                 devices = request.get("device_info") or {}
                 report = diagnosis_report(conclusions, devices, errors, link_trace)
-                process = connection_process_text(timing_rows, conclusions)
-                if process:
-                    report = report + "\n\n" + process
                 send(
                     "result",
                     data={
@@ -438,6 +454,7 @@ def serve(directory):
                         "file_paths": paths,
                         "analyzed_file_count": len(log_paths),
                         "report_text": report,
+                        "tables": table_data,
                         "incidents": locations,
                         "device_info": devices,
                         "analysis_errors": errors,

@@ -295,7 +295,14 @@ class AppWindow(QMainWindow):
         scope_row.addWidget(QLabel("分析范围"))
         self.combo_mode = QComboBox()
         self.combo_mode.addItems(
-            ["全部日志", "按日期分析", "按时间分析", "多时间点分析", "按测试周期分析"]
+            [
+                "全部日志",
+                "按日期分析",
+                "按时间分析",
+                "多时间点分析",
+                "按测试周期分析",
+                "通知异常",
+            ]
         )
         self.combo_mode.currentIndexChanged.connect(self.update_time_widgets)
         scope_row.addWidget(self.combo_mode)
@@ -523,6 +530,7 @@ class AppWindow(QMainWindow):
 
         self.results = QTabWidget(self.vsplit)
         self._log_data_pane_height = None
+        self._log_tables_current = False
         self.results.setObjectName("BottomTabs")
         self.txt_analysis = QPlainTextEdit()
         self.txt_analysis.setObjectName("ReportView")
@@ -573,13 +581,13 @@ class AppWindow(QMainWindow):
         self.tbl_matches.doubleClicked.connect(self.match_clicked)
         self.results.addTab(self.tbl_matches, "筛选结果 (0)")
         self.connection_timings = ConnectionTimingPanel(self.results)
-        self.connection_timings.scan_requested.connect(self.start_connection_timings)
+        self.connection_timings.scan_requested.connect(self.start_log_tables)
         self.connection_timings.jump_requested.connect(self.goto)
         self.results.addTab(self.connection_timings, "配对／回连耗时")
         self.sample_panels = {}
         for kind, label in SAMPLE_LABELS.items():
             panel = BluetoothSamplePanel(kind, self.results)
-            panel.scan_requested.connect(self.start_bluetooth_samples)
+            panel.scan_requested.connect(self.start_log_tables)
             panel.jump_requested.connect(self.goto)
             self.results.addTab(panel, label)
             self.sample_panels[kind] = panel
@@ -695,7 +703,7 @@ class AppWindow(QMainWindow):
         date = mode in ("按日期分析", "按时间分析", "多时间点分析")
         time = mode in ("按时间分析", "多时间点分析")
         multi = mode == "多时间点分析"
-        self.time_bar.setVisible(mode != "全部日志")
+        self.time_bar.setVisible(date or period)
         for w in [self.date_label, self.date_issue]:
             w.setVisible(date)
         for w in [
@@ -727,7 +735,7 @@ class AppWindow(QMainWindow):
 
     def issue_times(self):
         mode = self.combo_mode.currentText()
-        if mode in ("全部日志", "按测试周期分析"):
+        if mode in ("全部日志", "按测试周期分析", "通知异常"):
             return []
         if mode == "按日期分析":
             return [self.current_datetime().replace(hour=12, minute=0, second=0)]
@@ -844,7 +852,11 @@ class AppWindow(QMainWindow):
         self.tabs.blockSignals(False)
         self._sync_auxiliary_visibility()
         self.txt_analysis.setPlainText(
-            "按「开始分析」或 F5 执行异常分析。"
+            (
+                "按「开始分析」或 F5 执行异常分析。"
+                if files
+                else "本次没有导入可读取的日志。"
+            )
             + (
                 "\n\n导入详情：\n" + "\n".join(self._import_notes)
                 if self._import_notes
@@ -862,7 +874,11 @@ class AppWindow(QMainWindow):
         self._files_are_prepared = True
         if files:
             self.select_file_by_path(self._visible_file_paths()[0])
-        msg = f"已载入 {len(self._visible_file_paths())} 个文件 | 按 F5 分析"
+        msg = (
+            f"已载入 {len(self._visible_file_paths())} 个文件 | 按 F5 分析"
+            if files
+            else "未导入可读取的日志"
+        )
         if result.get("notes"):
             msg += f" | 解包提示 {len(result['notes'])} 条"
         self.lbl_status.setText(msg)
@@ -932,13 +948,11 @@ class AppWindow(QMainWindow):
             self.select_file_by_path(visible_paths[0])
 
     def _auto_analyze_after_import(self):
-        if (
-            self.last_open_paths
-            and self._files_are_prepared
-            and self.chk_auto_analyze.isChecked()
-            and not self._closing
-        ):
-            self.reanalyze()
+        if self.last_open_paths and self._files_are_prepared and not self._closing:
+            if self.chk_auto_analyze.isChecked():
+                self.reanalyze()
+            else:
+                self.start_log_tables()
 
     def _refresh_cancel_state(self):
         running = any(
@@ -1320,58 +1334,62 @@ class AppWindow(QMainWindow):
         self._log_data_pane_height = None
 
     def _reset_log_data_pages(self, has_logs):
+        self._log_tables_current = False
         for panel in self._log_data_pages:
             panel.reset(has_logs)
 
-    def start_connection_timings(self):
-        self._start_log_data_job(
-            "connection_timings", (self.connection_timings,), "正在计算配对／回连耗时…"
-        )
+    def _set_log_tables_loading(self):
+        for panel in self._log_data_pages:
+            panel.scan.setEnabled(False)
+            panel.message("正在扫描日志…")
 
-    def start_bluetooth_samples(self):
-        self._start_log_data_job(
-            "bluetooth_samples",
-            tuple(self.sample_panels.values()),
-            "正在读取蓝牙与上镜记录…",
-        )
-
-    def _start_log_data_job(self, operation, panels, message):
+    def start_log_tables(self):
         if self._busy():
             self.statusBar().showMessage("当前打开或分析任务尚未结束")
             return
         paths = [
-            path
-            for path in self.file_list_data
-            if path not in self._auxiliary_paths and path not in self._binary_paths
+            path for path in self.file_list_data if path not in self._auxiliary_paths
         ]
         if not paths:
-            for panel in panels:
+            for panel in self._log_data_pages:
                 panel.message("当前没有可读取的文本日志")
             return
         from .job_process import AnalysisProcess
 
-        for panel in panels:
-            panel.scan.setEnabled(False)
-            panel.message("正在扫描日志…")
+        self._set_log_tables_loading()
         self.progress.show()
-        self.analysis_progress(0, message)
+        self.analysis_progress(0, "正在读取配对、蓝牙和通知记录…")
         self.worker = AnalysisProcess(
-            self._analysis_session, {"operation": operation, "paths": paths}
+            self._analysis_session, {"operation": "log_tables", "paths": paths}
         )
         self.worker.progress.connect(self.analysis_progress)
-        self.worker.finished.connect(lambda data: self._log_data_job_done(panels, data))
+        self.worker.finished.connect(self._log_data_job_done)
         self._analysis_pending = True
         self.btn_cancel.setEnabled(True)
         self.worker.start()
 
-    def _log_data_job_done(self, panels, data):
+    def _show_log_tables(self, data):
+        if data.get("tables") is not None:
+            tables = data["tables"]
+            self._log_tables_current = True
+            self.connection_timings.show_result(tables["timings"])
+            for panel in self.sample_panels.values():
+                panel.show_result(tables["samples"])
+        elif data.get("error") or data.get("cancelled"):
+            for panel in self._log_data_pages:
+                panel.show_result(data)
+
+    def _log_data_job_done(self, data):
         self._analysis_pending = False
         self._refresh_cancel_state()
         self.progress.hide()
-        for panel in panels:
-            panel.show_result(data)
+        self._show_log_tables(data)
         current = self.results.currentWidget()
-        status = (current if current in panels else panels[0]).status.text()
+        status = (
+            current.status.text()
+            if current in self._log_data_pages
+            else "日志页签已更新"
+        )
         self.lbl_status.setText(status)
         self.statusBar().showMessage(status)
 
@@ -1390,6 +1408,8 @@ class AppWindow(QMainWindow):
             window = max(1, min(180, int(self.input_window.text())))
         except ValueError:
             window = 10
+        if not self._log_tables_current:
+            self._set_log_tables_loading()
         self.lbl_status.setText("分析中...")
         self.progress.setValue(0)
         self.progress.show()
@@ -1408,6 +1428,7 @@ class AppWindow(QMainWindow):
             range_start=start,
             range_end=end,
             device_info=self.device_info,
+            refresh_tables=not self._log_tables_current,
             rules_path=str(rule_config.RULES_PATH),
         )
         self.worker = AnalysisProcess(self._analysis_session, request)
@@ -1438,9 +1459,13 @@ class AppWindow(QMainWindow):
         self.btn_analyze.setEnabled(True)
         self.action_analyze.setEnabled(True)
         if data.get("cancelled"):
+            if not self._log_tables_current:
+                self._show_log_tables(data)
             self.lbl_status.setText("已取消分析")
             return
         if data.get("error"):
+            if not self._log_tables_current:
+                self._show_log_tables(data)
             self.lbl_status.setText("分析失败")
             QMessageBox.warning(self, "分析失败", str(data["error"]))
             return
@@ -1473,6 +1498,7 @@ class AppWindow(QMainWindow):
             self.current_file = None
             self.viewer.set_log_text("")
             self._set_edit_enabled(False)
+        self._show_log_tables(data)
         self.last_analysis_metadata = {
             "reused_cache": data.get("reused_cache"),
             "process_token": data.get("prepared_payload", {}).get("process_token"),

@@ -33,6 +33,7 @@ SAMPLE_COLUMNS = {
         ("来源 App", 120),
         ("标题", 140),
         ("消息", 240),
+        ("App ID", 140),
     ),
 }
 
@@ -104,7 +105,7 @@ class BluetoothSamplePanel(QWidget):
         layout.setSpacing(0)
         controls = QHBoxLayout()
         controls.setContentsMargins(4, 2, 4, 2)
-        self.scan = QPushButton("读取日志")
+        self.scan = QPushButton("重新读取")
         self.status = QLabel()
         self.status.setTextFormat(Qt.TextFormat.PlainText)
         self.status.setSizePolicy(
@@ -124,6 +125,8 @@ class BluetoothSamplePanel(QWidget):
         self.table.setModel(self.model)
         for column, (_, width) in enumerate(self.model.columns):
             self.table.setColumnWidth(column, width)
+        if kind == "mirrored":
+            self.table.horizontalHeader().moveSection(7, 5)
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.activated.connect(self._jump)
         self.scan.clicked.connect(self.scan_requested)

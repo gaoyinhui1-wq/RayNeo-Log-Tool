@@ -309,6 +309,27 @@ class InputTests(unittest.TestCase):
             self.addCleanup(shutil.rmtree, work, True)
         return files, notes, work
 
+    def test_deep_nested_zip_survives_windows_path_budget_and_bad_sibling(self):
+        inner = io.BytesIO()
+        member = (
+            "appLog/2026-11-24/tmk_diagnosis/"
+            + ("one_to_one_offline_" + "a" * 48 + "/") * 5
+        )
+        with zipfile.ZipFile(inner, "w") as zipped:
+            zipped.writestr(member + "network_status.tlog", "deep log")
+            zipped.writestr("unreadable.zip", "invalid archive")
+            zipped.writestr("2026-11-24-01.log", "other log")
+        outer = self.root / "2026-11-24-dev_export_logs.zip"
+        with zipfile.ZipFile(outer, "w") as zipped:
+            zipped.writestr("2026-11-24-phone_log.zip", inner.getvalue())
+        paths, notes, _ = self.prepare([outer])
+        self.assertEqual(
+            {Path(path).name: Path(path).read_text() for path in paths},
+            {"network_status.tlog": "deep log", "2026-11-24-01.log": "other log"},
+        )
+        self.assertTrue(all(len(path.encode("utf-16-le")) // 2 < 248 for path in paths))
+        self.assertTrue(any("跳过归档条目 unreadable.zip" in note for note in notes))
+
     def test_mixed_files_folders_archives(self):
         folder = self.root / "folder"
         folder.mkdir()
