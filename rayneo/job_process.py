@@ -397,14 +397,16 @@ def serve(directory):
                     reused = False
                 else:
                     reused = True
-                incidents, errors = cached
+                incidents, errors, link_trace = cached
                 devices = request.get("device_info") or {}
                 send(
                     "result",
                     data={
                         "source_changed": changed,
                         "file_paths": paths,
-                        "report_text": diagnosis_report(incidents, devices, errors),
+                        "report_text": diagnosis_report(
+                            incidents, devices, errors, link_trace
+                        ),
                         "incidents": incidents,
                         "device_info": devices,
                         "analysis_errors": errors,

@@ -36,7 +36,7 @@ class GuiTests(GuiCase):
         self.win.reanalyze()
         self.wait(lambda: self.win.has_analyzed and not self.win._busy())
         self.assertEqual(len(self.win.incidents), 1)
-        self.assertIn("眼镜版本交换超时", self.win.txt_analysis.toPlainText())
+        self.assertIn("眼镜的版本查询超时", self.win.txt_analysis.toPlainText())
         self.wait(lambda: self.win.file_read_worker is None)
         payload = self.win.prepared_payload
         self.win.reanalyze()

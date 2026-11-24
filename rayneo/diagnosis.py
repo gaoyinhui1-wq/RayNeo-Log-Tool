@@ -7,6 +7,7 @@ from pathlib import Path
 from statistics import median
 
 from .device_info import _path_time_hint
+from .diagnosis_timeline import LINK_MARKERS, LinkTimeline, diagnosis_report, note
 from .ingestion import _is_glasses_metadata_only, _is_glasses_side_path, scan_text_file
 from .indexing import required_regex_seeds
 from .link_diagnostics import (
@@ -191,7 +192,7 @@ def _trace_time(line, logcat_year):
         return None
 
 
-def scan_causes(path, windows, disabled=(), prioritized=()):
+def scan_causes(path, windows, disabled=(), prioritized=(), traces=None):
     is_glasses = _is_glasses_side_path(path)
     file_name = Path(path).name
     date_hint, _ = _path_time_hint(path)
@@ -205,6 +206,8 @@ def scan_causes(path, windows, disabled=(), prioritized=()):
         )
     )
     markers = list(MARKERS)
+    if traces is not None:
+        markers.extend(LINK_MARKERS)
     full_scan = False
     for rule in prioritized:
         for term in rule["异常日志"]:
@@ -222,11 +225,29 @@ def scan_causes(path, windows, disabled=(), prioritized=()):
         notifications, ancs_failures = OrderedDict(), OrderedDict()
         process = fatal = crash_time = None
         named = set()
+        active_number, active_line = None, ""
 
-        def add(code, priority, name, reason, number, time, device=None, status="明确"):
-            if (
-                windows and not (time and any(a <= time <= b for a, b in windows))
-            ) or name in disabled:
+        def in_scope(time):
+            return not windows or (
+                time is not None and any(a <= time <= b for a, b in windows)
+            )
+
+        link = LinkTimeline(path, in_scope) if traces is not None else None
+
+        def add(
+            code,
+            priority,
+            name,
+            reason,
+            number,
+            time,
+            device=None,
+            status="明确",
+            *,
+            raw="",
+            steps=(),
+        ):
+            if not in_scope(time) or name in disabled:
                 return
             previous = found.get(code)
             if previous is None or priority > previous["priority"]:
@@ -241,9 +262,17 @@ def scan_causes(path, windows, disabled=(), prioritized=()):
                     "line": number,
                     "time": time,
                     "device_id": device,
+                    "event": note(
+                        time,
+                        path,
+                        number,
+                        reason,
+                        raw or (active_line if number == active_number else ""),
+                    ),
+                    "steps": steps,
                 }
 
-        def crashed(label, number, time):
+        def crashed(label, number, time, raw=""):
             if BT_PROCESS.fullmatch(label) and not is_glasses:
                 add(
                     "phone_bt",
@@ -252,6 +281,7 @@ def scan_causes(path, windows, disabled=(), prioritized=()):
                     f"{label} 进程异常退出。",
                     number,
                     time,
+                    raw=raw,
                 )
             elif SYSTEM_PROCESS.fullmatch(label) or is_glasses:
                 add(
@@ -261,6 +291,7 @@ def scan_causes(path, windows, disabled=(), prioritized=()):
                     f"{label} 进程异常退出。",
                     number,
                     time,
+                    raw=raw,
                 )
             elif APP_PROCESS.search(label):
                 add(
@@ -270,6 +301,7 @@ def scan_causes(path, windows, disabled=(), prioritized=()):
                     f"{label} 进程异常退出。",
                     number,
                     time,
+                    raw=raw,
                 )
 
         source = enumerate(stream) if full_scan else candidate_lines(stream, markers)
@@ -281,9 +313,12 @@ def scan_causes(path, windows, disabled=(), prioritized=()):
             ):
                 continue
             time = _trace_time(line, logcat_year)
+            active_number, active_line = number, line
             if time and "date/time:" in line.lower():
                 crash_time = time
             device = _device(line)
+            if link is not None:
+                link.observe(number, line, time, device)
             for rule in prioritized:
                 if _rule_trigger_match(rule, line) and not _any_term_matches(
                     rule["排除日志"], line
@@ -305,7 +340,7 @@ def scan_causes(path, windows, disabled=(), prioritized=()):
                     "controller",
                     100,
                     "蓝牙控制器硬件故障",
-                    "控制器上报硬件错误或自检失败。",
+                    "蓝牙控制器报了硬件故障。",
                     number,
                     time,
                     device,
@@ -315,7 +350,7 @@ def scan_causes(path, windows, disabled=(), prioritized=()):
                     "phone_bt",
                     99,
                     "手机蓝牙栈异常退出",
-                    "手机系统记录了蓝牙服务崩溃或进程死亡。",
+                    "手机系统里有蓝牙服务退出的记录。",
                     number,
                     time,
                     device,
@@ -326,10 +361,10 @@ def scan_causes(path, windows, disabled=(), prioritized=()):
                 label = next(group for group in proc_match.groups() if group)
                 process = label, number
                 if fatal and number - fatal[0] <= 5:
-                    crashed(label, fatal[0], fatal[1] or time)
+                    crashed(label, fatal[0], fatal[1] or time, raw=fatal[2])
                     fatal = None
             if ANDROID_FATAL.search(line):
-                fatal = number, time
+                fatal = number, time, line[:180]
             if SYSTEM_FATAL.search(line):
                 crashed("system_server", number, time)
             if NATIVE_FATAL.search(line):
@@ -344,7 +379,7 @@ def scan_causes(path, windows, disabled=(), prioritized=()):
                     "bond",
                     82,
                     "蓝牙配对密钥或加密失败",
-                    "蓝牙连接阶段返回密钥缺失或加密失败。",
+                    "蓝牙连到配对加密这一步时失败了。",
                     number,
                     time,
                     device,
@@ -354,7 +389,7 @@ def scan_causes(path, windows, disabled=(), prioritized=()):
                     "protocol",
                     73,
                     "眼镜版本交换超时",
-                    "已进入连接流程，眼镜未及时回复版本查询。",
+                    "连接已开始，眼镜的版本查询超时。",
                     number,
                     time,
                     device,
@@ -381,8 +416,8 @@ def scan_causes(path, windows, disabled=(), prioritized=()):
                     if (
                         earlier
                         and time
-                        and earlier[1]
-                        and 0 <= (time - earlier[1]).total_seconds() <= 90
+                        and earlier[0][1]
+                        and 0 <= (time - earlier[0][1]).total_seconds() <= 90
                     ):
                         ancs_failures.pop(device, None)
                 if NOTIFY_PERMISSION.search(line):
@@ -390,36 +425,39 @@ def scan_causes(path, windows, disabled=(), prioritized=()):
                         "notify_permission",
                         87,
                         "通知同步权限未就绪",
-                        "系统或 ANCS 回调明确返回权限拒绝。",
+                        "通知同步时，权限请求被拒绝。",
                         number,
                         time,
                         device,
                     )
                 elif ancs and ANCS_FAILURE.search(line):
-                    ancs_failures[device] = number, time, device
+                    ancs_failures[device] = (number, time, device), line[:180]
                     if len(ancs_failures) > 128:
+                        anchor, raw = ancs_failures.popitem(last=False)[1]
                         add(
                             "ancs",
                             72,
                             "ANCS 建链或订阅失败",
-                            "ANCS 返回建链、订阅或属性读取失败。",
-                            *ancs_failures.popitem(last=False)[1],
+                            "ANCS 操作失败。",
+                            *anchor,
+                            raw=raw,
                         )
                 elif notify and NOTIFY_FAILURE.search(line):
                     if message_key:
-                        notifications[message_key] = number, time, device
+                        notifications[message_key] = (number, time, device), line[:180]
                     if not message_key or len(notifications) > 256:
-                        anchor = (
+                        anchor, raw = (
                             notifications.popitem(last=False)[1]
                             if message_key
-                            else (number, time, device)
+                            else ((number, time, device), line[:180])
                         )
                         add(
                             "notification",
                             66,
                             "手机通知转发失败",
-                            "通知发送或转发回调返回失败。",
+                            "手机没能转发这条通知。",
                             *anchor,
+                            raw=raw,
                         )
 
             if time is None:
@@ -456,7 +494,7 @@ def scan_causes(path, windows, disabled=(), prioritized=()):
                 ):
                     signal = median(recent.values())
                     if signal <= -78:
-                        lane["weak"] = (number, time, signal, len(recent))
+                        lane["weak"] = (number, time, signal, len(recent), line[:180])
                         add(
                             "weak_signal",
                             74,
@@ -468,7 +506,7 @@ def scan_causes(path, windows, disabled=(), prioritized=()):
                             "关联",
                         )
             if lane["weak"] and RECOVERY["BLE"].search(line):
-                anchor, fault_time, low, _ = lane["weak"]
+                anchor, fault_time, low, count, raw = lane["weak"]
                 post = {
                     t: value
                     for t, value in lane["samples"]
@@ -486,36 +524,57 @@ def scan_causes(path, windows, disabled=(), prioritized=()):
                             fault_time,
                             device,
                             "关联",
+                            steps=[
+                                [
+                                    note(
+                                        fault_time,
+                                        path,
+                                        anchor,
+                                        f"断开前 {count} 次 RSSI 采样的中位数为 {low:g} dBm。",
+                                        raw,
+                                    )
+                                ],
+                                [
+                                    note(
+                                        time,
+                                        path,
+                                        number,
+                                        f"RSSI 回到 {improved:g} dBm，BLE 重新连上。",
+                                        line,
+                                    )
+                                ],
+                            ],
                         )
                 lane["weak"] = None
 
-        for number, time, device in notifications.values():
+        for anchor, raw in notifications.values():
             add(
                 "notification",
                 66,
                 "手机通知转发失败",
-                "通知发送或转发回调返回失败。",
-                number,
-                time,
-                device,
+                "手机没能转发这条通知。",
+                *anchor,
+                raw=raw,
             )
-        for number, time, device in ancs_failures.values():
+        for anchor, raw in ancs_failures.values():
             add(
                 "ancs",
                 72,
                 "ANCS 建链或订阅失败",
-                "ANCS 返回建链、订阅或属性读取失败。",
-                number,
-                time,
-                device,
+                "ANCS 操作失败。",
+                *anchor,
+                raw=raw,
             )
         if len(named) > 1:
             for code in ("weak_signal", "environment"):
                 if code in found and not found[code]["device_id"]:
                     del found[code]
-        return list(found.values())
+        return list(found.values()), link.result(len(named) > 1) if link else None
 
-    return scan_text_file(path, scan) or []
+    items, trace = scan_text_file(path, scan) or ([], None)
+    if trace and traces is not None:
+        traces.append(trace)
+    return items
 
 
 def select_causes(candidates):
@@ -557,6 +616,7 @@ def select_causes(candidates):
 
 def diagnose(paths, windows, disabled, progress, external_rules=()):
     candidates, errors = [], []
+    traces = []
     prioritized = [
         rule
         for rule in external_rules
@@ -568,23 +628,13 @@ def diagnose(paths, windows, disabled, progress, external_rules=()):
     for idx, path in enumerate(paths, 1):
         progress(idx, len(paths), Path(path).name)
         try:
-            candidates.extend(scan_causes(path, windows, disabled, prioritized))
+            candidates.extend(scan_causes(path, windows, disabled, prioritized, traces))
         except OSError as exc:
             errors.append(f"{Path(path).name}：{exc}")
-    return select_causes(candidates), errors
-
-
-def diagnosis_report(items, devices, errors=()):
-    lines = []
-    for item in items:
-        lines.extend((item["name"], item["custom_analysis"]))
-        when = item["time"].strftime("%m-%d %H:%M:%S") if item["time"] else ""
-        lines.extend((f"{when}  {item['file']}:{item['line'] + 1}".strip(), ""))
-    if not items:
-        lines.extend(("本次日志未确认直接原因。", ""))
-    fields = ("App版本", "手机系统版本", "RayneoNet SDK", "眼镜系统版本")
-    values = [f"{field}  {devices[field]}" for field in fields if devices.get(field)]
-    lines.extend(values)
-    if errors:
-        lines.append(f"{len(errors)} 个文件读取失败。")
-    return "\n".join(lines).rstrip()
+    selected = select_causes(candidates)
+    link_trace = (
+        None
+        if selected
+        else max(traces, key=lambda trace: (trace[1], len(trace[0])), default=None)
+    )
+    return selected, errors, link_trace

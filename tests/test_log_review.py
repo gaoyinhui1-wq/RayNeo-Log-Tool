@@ -7,9 +7,10 @@ from unittest import TestCase
 from unittest.mock import patch
 
 from PyQt6.QtCore import QSettings, QTimer
+from PyQt6.QtWidgets import QApplication
 
 from gui_support import GuiCase
-from rayneo.diagnosis import diagnosis_report, scan_causes, select_causes
+from rayneo.diagnosis import diagnose, diagnosis_report, scan_causes, select_causes
 from rayneo.ingestion import VLOG_AAD, VLOG_DEFAULT_KEY_BASE64, VLOG_MAGIC
 from rayneo.log_edit import LogEditDialog
 
@@ -98,11 +99,77 @@ class FocusedDiagnosisTests(TestCase):
         self.assertEqual(result[0]["rule_id"], "phone_bt")
         self.assertEqual(result[0]["time"], datetime(2026, 5, 1, 10, 0, 13, 254000))
 
+    def test_quick_authentication_or_different_devices_do_not_make_a_gap(self):
+        with TemporaryDirectory() as folder:
+            path = Path(folder) / "combined.log"
+            cases = (
+                (
+                    "2026-05-01 10:00:00 rnlink:0 ble acl:1 deviceId=aa\n"
+                    "2026-05-01 10:00:01 handle_rnlink_auth_success deviceId=aa\n"
+                ),
+                (
+                    "2026-05-01 10:00:00 rnlink:0 deviceId=aa\n"
+                    "2026-05-01 10:00:01 ble acl:1 deviceId=bb\n"
+                    "2026-05-01 10:05:00 handle_rnlink_auth_success deviceId=aa\n"
+                ),
+            )
+            for lines in cases:
+                path.write_text(lines, encoding="utf-8")
+                items, errors, timeline = diagnose([str(path)], (), (), lambda *_: None)
+                self.assertEqual(items, [])
+                self.assertFalse(errors)
+                self.assertIsNone(timeline)
+
 
 class ReviewUiTests(GuiCase):
     def load(self, *paths):
         self.win.start_preview([str(path) for path in paths], True)
         self.wait(lambda: not self.win._busy() and self.win.file_read_worker is None)
+
+    def test_timeline_is_identical_in_viewer_copy_and_export(self):
+        source = self.root / "combined.log"
+        source.write_text(
+            "2026-05-01 09:56:03 native-auto-connect disable reason=auto_reconnect_timeout\n"
+            "2026-05-01 10:03:00 State transition: DEEP_SLEEP -> RUNNING\n"
+            "2026-05-01 10:03:01 Advertising started\n"
+            "2026-05-01 10:03:03 rnlink:0\n"
+            "2026-05-01 10:03:03 ble acl:1\n"
+            "2026-05-01 10:08:03 rnlink_on_conn_state link_type: BLE_ACL, state 0, reason:8\n"
+            "2026-05-01 10:09:00 sceneWillEnterForeground\n"
+            "2026-05-01 10:09:02 handle_rnlink_auth_success\n",
+            encoding="utf-8",
+        )
+        self.load(source)
+        with patch("rayneo.window.QMessageBox.warning") as warning:
+            self.win.reanalyze()
+            self.wait(lambda: not self.win._busy())
+        warning.assert_not_called()
+        self.assertTrue(self.win.has_analyzed)
+        report = self.win.txt_analysis.toPlainText()
+        sequence = (
+            "09:56:03 手机这次自动回连超时。",
+            "10:03:00 设备结束深睡",
+            "10:03:01 BLE 广播启动。",
+            "10:03:03 BLE ACL 已连上，RNLink 还是 0。",
+            "10:08:03 BLE ACL 断开。",
+            "10:09:00 App 回到前台。",
+            "10:09:02 RNLink 鉴权成功。",
+            "这段卡在 RNLink 建链，原因待确认。",
+        )
+        positions = [report.index(fragment) for fragment in sequence]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("combined.log:4  rnlink:0", report)
+        self.assertEqual(self.win.results.currentIndex(), 0)
+        self.win.show_report()
+        self.assertEqual(self.win._report_view.toPlainText(), report)
+        self.win.copy_analysis()
+        self.assertEqual(QApplication.clipboard().text(), report)
+        target = self.root / "report.txt"
+        with patch(
+            "rayneo.window.QFileDialog.getSaveFileName", return_value=(str(target), "")
+        ):
+            self.win.export_analysis()
+        self.assertEqual(target.read_text(encoding="utf-8"), report)
 
     def test_versions_are_visible_before_any_analysis_and_binary_is_escaped(self):
         text_path = self.root / "a.log"

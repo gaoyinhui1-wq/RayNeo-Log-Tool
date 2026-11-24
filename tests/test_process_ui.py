@@ -57,12 +57,12 @@ class ProcessUiTests(GuiCase):
         )
         self.win.start_preview([path], True)
         self.wait(lambda: self.win.has_analyzed and not self.win._busy())
-        self.assertEqual(self.win.results.currentIndex(), 1)
+        self.assertEqual(self.win.results.currentIndex(), 0)
         self.assertEqual(self.win.incidents[0]["rule_id"], "phone_bt")
         self.assertNotEqual(
             self.win.last_analysis_metadata["process_token"], os.getpid()
         )
-        self.assertIn("手机蓝牙栈", self.win._complete_report())
+        self.assertIn("蓝牙服务退出", self.win._complete_report())
         self.assertFalse(self.win.windowIcon().isNull())
 
     def test_search_stays_visible_and_floating_panels_return_without_losing_results(

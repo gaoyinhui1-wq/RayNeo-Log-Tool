@@ -511,9 +511,9 @@ class AppWindow(QMainWindow):
         self.txt_analysis.setReadOnly(True)
         self.txt_analysis.setUndoRedoEnabled(False)
         self.txt_analysis.setFont(QFont("Segoe UI", 10))
-        self.txt_analysis.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.txt_analysis.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
         self.report_highlighter = None  # 首次分析完成时才创建高亮器，减少首次启动开销
-        self.results.addTab(self.txt_analysis, "结论")
+        self.results.addTab(self.txt_analysis, "分析结果")
         self.tbl_incidents = QTableView()
         self.tbl_incidents.setAlternatingRowColors(True)
         self.tbl_incidents.setSelectionBehavior(
@@ -939,7 +939,7 @@ class AppWindow(QMainWindow):
             box = QVBoxLayout(self._report_dialog)
             self._report_view = QPlainTextEdit()
             self._report_view.setReadOnly(True)
-            self._report_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+            self._report_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
             box.addWidget(self._report_view)
             button = QPushButton("导出完整报告")
             button.clicked.connect(self.export_analysis)
@@ -1341,7 +1341,7 @@ class AppWindow(QMainWindow):
             self.match_model.search_spec is not None or not self.btn_filter.isEnabled()
         )
         if not keep_filter:
-            self.results.setCurrentIndex(1 if self.incidents else 0)
+            self.results.setCurrentIndex(0)
             self.results.show()
         if self.current_file is None and self.file_list_data:
             self.select_file_by_path(
