@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from statistics import median
 
+from .device_info import _path_time_hint
 from .ingestion import _is_glasses_metadata_only, _is_glasses_side_path, scan_text_file
 from .indexing import required_regex_seeds
 from .link_diagnostics import (
@@ -52,7 +53,8 @@ ANDROID_FATAL = re.compile(r"\bFATAL EXCEPTION\s*:\s*\S", re.I)
 SYSTEM_FATAL = re.compile(r"\bFATAL EXCEPTION IN SYSTEM PROCESS\s*:", re.I)
 NATIVE_FATAL = re.compile(
     r"\b(?:Fatal signal \d+ \(SIG(?:SEGV|ABRT|BUS|ILL)\)|Exception Type:\s*EXC_\w+)"
-    r'|"type"\s*:\s*"EXC_(?:BAD_ACCESS|CRASH|BREAKPOINT|RESOURCE)"',
+    r'|"type"\s*:\s*"EXC_(?:BAD_ACCESS|CRASH|BREAKPOINT|RESOURCE)"'
+    r"|\bTermination Reason:\s*(?:Namespace\s+)?WATCHDOG\b",
     re.I,
 )
 NATIVE_PROCESS = re.compile(r"\bpid\s+\d+\s*\(([\w.-]+)\)", re.I)
@@ -98,6 +100,8 @@ LINK_RSSI = re.compile(
     r"\b(?:didReadRSSI|deviceRssi|bleRssi|BLE|Bluetooth|GATT|RNLink)\b",
     re.I,
 )
+LOGCAT_TIME = re.compile(r"^\s*(\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d{1,6})?)")
+ISO_TRACE_TIME = re.compile(r"\b(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,6})?)")
 
 MARKERS = (
     "hardware",
@@ -110,6 +114,8 @@ MARKERS = (
     "fatal exception",
     "fatal signal",
     "exception type:",
+    "date/time:",
+    "termination reason:",
     "process:",
     '"procname"',
     '"exc_',
@@ -171,9 +177,33 @@ def _new_link():
     return {"samples": deque(maxlen=48), "manual": None, "weak": None}
 
 
+def _trace_time(line, logcat_year):
+    standard = parse_log_time(line)
+    if standard is not None:
+        return standard
+    iso = ISO_TRACE_TIME.search(line[:96])
+    short = LOGCAT_TIME.match(line) if iso is None else None
+    if iso is None and short is None:
+        return None
+    try:
+        return datetime.fromisoformat(iso[1] if iso else f"{logcat_year}-{short[1]}")
+    except ValueError:
+        return None
+
+
 def scan_causes(path, windows, disabled=(), prioritized=()):
     is_glasses = _is_glasses_side_path(path)
     file_name = Path(path).name
+    date_hint, _ = _path_time_hint(path)
+    logcat_year = (
+        date_hint.year
+        if date_hint
+        else (
+            windows[0][0].year
+            if windows
+            else datetime.fromtimestamp(Path(path).stat().st_mtime).year
+        )
+    )
     markers = list(MARKERS)
     full_scan = False
     for rule in prioritized:
@@ -190,7 +220,7 @@ def scan_causes(path, windows, disabled=(), prioritized=()):
         found = {}
         lanes = OrderedDict()
         notifications, ancs_failures = OrderedDict(), OrderedDict()
-        process = fatal = None
+        process = fatal = crash_time = None
         named = set()
 
         def add(code, priority, name, reason, number, time, device=None, status="明确"):
@@ -250,7 +280,9 @@ def scan_causes(path, windows, disabled=(), prioritized=()):
                 or MUTED_OR_REPLAY.search(line)
             ):
                 continue
-            time = parse_log_time(line)
+            time = _trace_time(line, logcat_year)
+            if time and "date/time:" in line.lower():
+                crash_time = time
             device = _device(line)
             for rule in prioritized:
                 if _rule_trigger_match(rule, line) and not _any_term_matches(
@@ -303,9 +335,9 @@ def scan_causes(path, windows, disabled=(), prioritized=()):
             if NATIVE_FATAL.search(line):
                 direct = NATIVE_PROCESS.search(line)
                 if direct:
-                    crashed(direct[1], number, time)
+                    crashed(direct[1], number, time or crash_time)
                 elif process and number - process[1] <= 80:
-                    crashed(process[0], number, time)
+                    crashed(process[0], number, time or crash_time)
 
             if BOND_FAILURE.search(line):
                 add(

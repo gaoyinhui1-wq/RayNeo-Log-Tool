@@ -90,6 +90,14 @@ class FocusedDiagnosisTests(TestCase):
             [],
         )
 
+    def test_logcat_timestamp_without_year_can_be_used_in_selected_range(self):
+        result = self.diagnose(
+            "05-01 10:00:13.254 E ActivityManager: Process com.android.bluetooth (pid 50) has died\n",
+            ((datetime(2026, 5, 1, 9), datetime(2026, 5, 1, 11)),),
+        )
+        self.assertEqual(result[0]["rule_id"], "phone_bt")
+        self.assertEqual(result[0]["time"], datetime(2026, 5, 1, 10, 0, 13, 254000))
+
 
 class ReviewUiTests(GuiCase):
     def load(self, *paths):
