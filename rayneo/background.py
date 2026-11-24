@@ -34,10 +34,21 @@ class PreviewOpenThread(QThread):
                 cancel_callback=self.isInterruptionRequested,
             )
             valid = [p for p in paths if not _is_glasses_metadata_only(p)]
+            metadata = [p for p in paths if _is_glasses_metadata_only(p)]
+            auxiliary = list(metadata)
+            for path in valid:
+                if self.isInterruptionRequested():
+                    raise InterruptedError("已取消导入")
+                try:
+                    if text_encoding(path) is None:
+                        auxiliary.append(path)
+                except OSError:
+                    continue
             self.completed.emit(
                 {
                     "paths": valid,
-                    "metadata_paths": [p for p in paths if p not in valid],
+                    "metadata_paths": metadata,
+                    "auxiliary_paths": auxiliary,
                     "notes": notes,
                     "tempdir": tempdir,
                 }

@@ -35,12 +35,20 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QDate, QTime, QDateTime, QEvent, QSettings, QTimer
 from PyQt6.QtGui import QFont, QColor, QAction
-from PyQt6.QtWidgets import QTableView, QDialog, QDialogButtonBox, QToolBar
+from PyQt6.QtWidgets import (
+    QTableView,
+    QDialog,
+    QDialogButtonBox,
+    QToolBar,
+    QToolButton,
+    QSizePolicy,
+)
 from PyQt6.QtCore import QAbstractTableModel, QModelIndex
 from PyQt6.QtGui import QBrush
 from . import rules as rule_config
 from .dialogs import InputDialog
 from .background import DecryptExportThread, FileReadThread, PreviewOpenThread
+from .device_info import format_device_summary
 from .rules import open_rules_file
 from .search import MatchResultModel
 from .matching import SearchSpec
@@ -130,6 +138,7 @@ class AppWindow(QMainWindow):
         self._line_index_cache = OrderedDict()
         self._file_revisions = {}
         self._binary_paths = set()
+        self._auxiliary_paths = set()
         self._large_indexes = OrderedDict()
         self._large_pages = {}
         self._tab_paths = []
@@ -181,6 +190,7 @@ class AppWindow(QMainWindow):
             m_file, "另存二进制预览…", None, self.save_binary_preview
         )
         self.action_binary_export.setEnabled(False)
+        self.action(m_file, "查看分析报告", None, self.show_report)
         self.action(m_file, "导出分析报告...", "Ctrl+E", self.export_analysis)
         m_file.addSeparator()
         self.action(m_file, "退出", "Ctrl+Q", self.close)
@@ -191,6 +201,11 @@ class AppWindow(QMainWindow):
         self.action(m_search, "跳转行...", "Ctrl+G", self.focus_jump)
         m_view = self.menuBar().addMenu("视图(&V)")
         m_view.addAction(self.notes.toggleViewAction())
+        self.action_show_auxiliary = QAction("显示辅助文件（二进制和元数据）", self)
+        self.action_show_auxiliary.setCheckable(True)
+        self.action_show_auxiliary.setEnabled(False)
+        self.action_show_auxiliary.toggled.connect(self._sync_auxiliary_visibility)
+        m_view.addAction(self.action_show_auxiliary)
         self.action_file_panel = self.action(
             m_view, "切换文件列表", "Alt+1", self.toggle_files
         )
@@ -210,11 +225,10 @@ class AppWindow(QMainWindow):
         layout = QVBoxLayout(base)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        # 两行紧凑工具栏：主要操作始终可见，不能被分析范围挤出窗口。
         tools = QFrame()
         tools.setObjectName("ToolStrip")
         tool_col = QVBoxLayout(tools)
-        tool_col.setContentsMargins(7, 4, 7, 4)
+        tool_col.setContentsMargins(7, 2, 7, 2)
         tool_col.setSpacing(4)
         actions_row = QToolBar("功能", self)
         actions_row.setObjectName("MainToolbar")
@@ -231,32 +245,24 @@ class AppWindow(QMainWindow):
 
         # 点击按钮直接弹出来源选择，不依赖隐藏的小箭头/菜单。
         self.btn_open = add_btn(
-            "打开日志…",
+            "打开",
             self.choose_open_source,
             "选择本地文件、压缩包或整个文件夹（Ctrl+O）",
         )
         self.btn_open.setObjectName("OpenButton")
-        self.btn_analyze = add_btn("▶ 开始分析", self.reanalyze, "F5 启动异常分析")
+        self.btn_analyze = add_btn("分析", self.reanalyze, "F5 启动异常分析")
         self.btn_analyze.setObjectName("AnalyzeButton")
-        self.btn_cancel = add_btn("取消任务", self.cancel_tasks)
+        self.btn_cancel = add_btn("取消", self.cancel_tasks, "取消当前后台任务")
         self.btn_cancel.setEnabled(False)
         self.btn_decrypt = add_btn(
-            "本地解密 / 解压",
+            "解密/解压",
             self.open_decrypt_dialog,
             "选择本地日志文件或文件夹，解密/解压到指定目录（Ctrl+Shift+D）",
         )
         self.btn_decrypt.setObjectName("DecryptButton")
-        # Keep import, analysis, cancel and decoding visible even at 570 px.
-        self.addToolBarBreak(Qt.ToolBarArea.TopToolBarArea)
-        actions_row = QToolBar("查看与搜索", self)
-        actions_row.setObjectName("ViewToolbar")
-        actions_row.setMovable(False)
-        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, actions_row)
         self.btn_new_note = add_btn(
             "新建笔记", self.notes.new_note, "Ctrl+N 新建分析笔记"
         )
-        self.btn_report = add_btn("查看报告", self.show_report)
-        self.btn_export = add_btn("导出报告", self.export_analysis)
         self.btn_float_search = add_btn("悬浮搜索", self.toggle_search_float)
         self.btn_float_results = add_btn("悬浮结果", self.toggle_results_float)
         self.has_analyzed = False
@@ -264,7 +270,6 @@ class AppWindow(QMainWindow):
         self.btn_find.setObjectName("SearchButton")
         self.btn_search = add_btn("筛选", self.show_filter, "Ctrl+Shift+F")
         self.btn_search.setObjectName("FilterButton")
-        add_btn("复制报告", self.copy_analysis)
         scope_row = QHBoxLayout()
         scope_row.setSpacing(5)
         scope_row.addWidget(QLabel("分析范围"))
@@ -293,7 +298,10 @@ class AppWindow(QMainWindow):
         self.device_bar = QLabel()
         self.device_bar.setObjectName("DeviceSummary")
         self.device_bar.setTextFormat(Qt.TextFormat.PlainText)
-        self.device_bar.setWordWrap(True)
+        self.device_bar.setWordWrap(False)
+        self.device_bar.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed
+        )
         self.device_bar.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
@@ -396,16 +404,11 @@ class AppWindow(QMainWindow):
         self.search_dock.setWidget(self.search_box)
         self.addDockWidget(Qt.DockWidgetArea.TopDockWidgetArea, self.search_dock)
         self.search_box.setObjectName("SearchBar")
-        sl = QVBoxLayout(self.search_box)
-        sl.setContentsMargins(6, 4, 6, 4)
-        sl.setSpacing(4)
-        query_row = QHBoxLayout()
-        query_row.setSpacing(4)
-        options_row = QHBoxLayout()
-        options_row.setSpacing(4)
-        sl.addLayout(query_row)
-        sl.addLayout(options_row)
+        query_row = QHBoxLayout(self.search_box)
+        query_row.setContentsMargins(5, 2, 5, 2)
+        query_row.setSpacing(3)
         self.search_input = QLineEdit()
+        self.search_input.setMinimumWidth(55)
         self.search_input.setPlaceholderText(
             "关键字用逗号分隔，例如 timeout，disconnect，exception"
         )
@@ -421,7 +424,7 @@ class AppWindow(QMainWindow):
         query_row.addWidget(self.filter_history)
         self.search_scope = QComboBox()
         self.search_scope.addItems(["当前文件", "所有文件"])
-        options_row.addWidget(self.search_scope)
+        query_row.addWidget(self.search_scope)
         self.keyword_mode = QComboBox()
         for label, mode in (
             ("任一关键字", "any"),
@@ -432,21 +435,27 @@ class AppWindow(QMainWindow):
         self.keyword_mode.setToolTip(
             "多个关键字用逗号或顿号分隔。全部关键字须在同一行出现。"
         )
-        options_row.addWidget(self.keyword_mode)
-        self.search_case = QCheckBox("大小写")
-        options_row.addWidget(self.search_case)
-        self.search_regex = QCheckBox("正则")
+        query_row.addWidget(self.keyword_mode)
+        self.search_case = QToolButton()
+        self.search_case.setText("Aa")
+        self.search_case.setCheckable(True)
+        self.search_case.setToolTip("区分大小写")
+        self.search_case.setAccessibleName("区分大小写")
+        query_row.addWidget(self.search_case)
+        self.search_regex = QToolButton()
+        self.search_regex.setText(".*")
+        self.search_regex.setCheckable(True)
+        self.search_regex.setAccessibleName("正则表达式")
         self.search_regex.setToolTip("将整个输入作为一个正则表达式")
         self.search_regex.toggled.connect(self._update_search_hint)
-        options_row.addWidget(self.search_regex)
-        options_row.addStretch(1)
+        query_row.addWidget(self.search_regex)
         self.btn_next = QPushButton("下一处")
         self.btn_next.clicked.connect(self.find_next)
-        options_row.addWidget(self.btn_next)
+        query_row.addWidget(self.btn_next)
         self.btn_filter = QPushButton("筛选")
         self.btn_filter.clicked.connect(self.filter_all)
         query_row.addWidget(self.btn_filter)
-        self.btn_clear_filter = QPushButton("清除筛选")
+        self.btn_clear_filter = QPushButton("清除")
         self.btn_clear_filter.setToolTip("清空筛选结果和标记，保留输入条件")
         self.btn_clear_filter.clicked.connect(self.clear_filter_results)
         query_row.addWidget(self.btn_clear_filter)
@@ -571,13 +580,13 @@ class AppWindow(QMainWindow):
         )
         navigation.hide()
         self.vsplit.addWidget(self.results)
-        self.results.setMinimumHeight(105)
+        self.results.setMinimumHeight(92)
         self.txt_analysis.setPlainText(
             "打开日志后，点击「开始分析」或按 F5。\n支持查找、筛选，并在下方查看分析报告和异常定位。"
         )
         self.vsplit.setStretchFactor(0, 4)
         self.vsplit.setStretchFactor(1, 1)
-        self.vsplit.setSizes([400, 145])
+        self.vsplit.setSizes([560, 108])
         rl.addWidget(self.vsplit, 1)
         self.hsplit.addWidget(right)
         self.hsplit.setStretchFactor(0, 0)
@@ -586,6 +595,7 @@ class AppWindow(QMainWindow):
         layout.addWidget(self.hsplit, 1)
         self.statusBar().setSizeGripEnabled(True)
         self.search_input.textChanged.connect(self._search_text_changed)
+        self.device_bar.installEventFilter(self)
 
     def styles(self):
         from .theme import NOTEPAD_STYLE
@@ -593,6 +603,11 @@ class AppWindow(QMainWindow):
         return NOTEPAD_STYLE
 
     def eventFilter(self, obj, event):
+        if (
+            obj is getattr(self, "device_bar", None)
+            and event.type() == QEvent.Type.Resize
+        ):
+            self._set_device_summary()
         if obj is self.viewer and event.type() in (
             QEvent.Type.Resize,
             QEvent.Type.Show,
@@ -606,6 +621,19 @@ class AppWindow(QMainWindow):
             self.viewer.setFocus()
             return True
         return super().eventFilter(obj, event)
+
+    def _set_device_summary(self, text=None):
+        if text is not None:
+            self.device_bar.setToolTip(text)
+        full = self.device_bar.toolTip()
+        if not full:
+            return
+        font = self.device_bar.fontMetrics()
+        self.device_bar.setText(
+            font.elidedText(
+                full, Qt.TextElideMode.ElideRight, max(0, self.device_bar.width() - 18)
+            )
+        )
 
     def position_find_bar(self):
         if not hasattr(self, "search_box"):
@@ -749,6 +777,9 @@ class AppWindow(QMainWindow):
             self._temp_dirs.add(result["tempdir"])
         self._import_notes = list(result.get("notes", []))
         self._import_metadata_paths = list(result.get("metadata_paths", []))
+        self._auxiliary_paths = set(
+            result.get("auxiliary_paths", self._import_metadata_paths)
+        )
         files = result.get("paths", []) + self._import_metadata_paths
         record_module = sys.modules.get("rayneo.records")
         if record_module is not None:
@@ -783,13 +814,13 @@ class AppWindow(QMainWindow):
         self._full_report = ""
         self._report_file = None
         self._report_truncated = False
-        self.btn_analyze.setText("▶ 开始分析")
+        self.btn_analyze.setToolTip("F5 启动异常分析")
         self.btn_analyze.setEnabled(True)
         self.action_analyze.setText("开始分析")
         self.action_analyze.setEnabled(True)
         self.list_files.blockSignals(False)
         self.tabs.blockSignals(False)
-        self.lbl_files.setText(f"文件 ({len(files)})")
+        self._sync_auxiliary_visibility()
         self.txt_analysis.setPlainText(
             "按「开始分析」或 F5 执行异常分析。"
             + (
@@ -808,8 +839,8 @@ class AppWindow(QMainWindow):
         self.last_is_file_list = True
         self._files_are_prepared = True
         if files:
-            self.select_file_by_path(self.file_list_data[0])
-        msg = f"已载入文件列表：{len(files)} 个 | 按 F5 分析"
+            self.select_file_by_path(self._visible_file_paths()[0])
+        msg = f"已载入 {len(self._visible_file_paths())} 个文件 | 按 F5 分析"
         if result.get("notes"):
             msg += f" | 解包提示 {len(result['notes'])} 条"
         self.lbl_status.setText(msg)
@@ -823,7 +854,7 @@ class AppWindow(QMainWindow):
     def _start_version_scan(self, auto=True):
         from .job_process import AnalysisProcess
 
-        self.device_bar.setText("正在读取 App、系统和 SDK 版本…")
+        self._set_device_summary("正在读取眼镜 SN 和版本…")
         self.device_bar.show()
         self._version_pending = True
         generation = self._input_generation
@@ -841,19 +872,45 @@ class AppWindow(QMainWindow):
             return
         self._version_pending = False
         self.device_info = data.get("device_info", {})
-        self.device_bar.setText(
-            "  ·  ".join(
-                f"{label} {self.device_info.get(field) or '未知'}"
-                for label, field in (
-                    ("App", "App版本"),
-                    ("手机系统", "手机系统版本"),
-                    ("SDK", "RayneoNet SDK"),
-                    ("眼镜系统", "眼镜系统版本"),
-                )
-            )
+        self._set_device_summary(
+            format_device_summary(self.device_info, show_unknown=True)
         )
         if auto and not data.get("cancelled"):
             self._auto_analyze_after_import()
+
+    def _visible_file_paths(self):
+        text_paths = [
+            path for path in self.file_list_data if path not in self._auxiliary_paths
+        ]
+        return (
+            self.file_list_data
+            if self.action_show_auxiliary.isChecked() or not text_paths
+            else text_paths
+        )
+
+    def _sync_auxiliary_visibility(self, *_):
+        visible_paths = self._visible_file_paths()
+        visible = set(visible_paths)
+        hidden = len(self.file_list_data) - len(visible)
+        self.action_show_auxiliary.setEnabled(
+            bool(self._auxiliary_paths)
+            and any(p not in self._auxiliary_paths for p in self.file_list_data)
+        )
+        self.list_files.blockSignals(True)
+        self.tabs.blockSignals(True)
+        for row, path in enumerate(self.file_list_data):
+            self.list_files.item(row).setHidden(path not in visible)
+        for index, path in enumerate(self._tab_paths):
+            self.tabs.setTabVisible(index, path in visible)
+        self.tabs.blockSignals(False)
+        self.list_files.blockSignals(False)
+        self.lbl_files.setText(f"文件 ({len(visible)})")
+        self.lbl_files.setToolTip(
+            f"已隐藏 {hidden} 个辅助文件。可从「视图」显示。" if hidden else ""
+        )
+        if self.current_file and self.current_file not in visible and visible_paths:
+            self.clear_filter_results()
+            self.select_file_by_path(visible_paths[0])
 
     def _auto_analyze_after_import(self):
         if (
@@ -1168,6 +1225,7 @@ class AppWindow(QMainWindow):
         if destination not in self.file_list_data:
             row = self.file_list_data.index(path)
             self.file_list_data[row] = destination
+            self._auxiliary_paths.discard(path)
             item = self.list_files.item(row)
             item.setText(Path(destination).name)
             item.setToolTip(destination)
@@ -1182,6 +1240,7 @@ class AppWindow(QMainWindow):
             self._file_revisions.pop(path, None)
             self._large_pages.pop(path, None)
             self._large_indexes.pop(path, None)
+            self._sync_auxiliary_visibility()
         self.raw_data.pop(destination, None)
         self._line_index_cache.pop(destination, None)
         self._file_revisions.pop(destination, None)
@@ -1235,6 +1294,7 @@ class AppWindow(QMainWindow):
         request = dict(
             operation="diagnose",
             paths=self.file_list_data or paths,
+            auxiliary_paths=list(self._auxiliary_paths),
             issue_times=self.issue_times(),
             window_minutes=window,
             analysis_mode=self.combo_mode.currentText(),
@@ -1312,7 +1372,7 @@ class AppWindow(QMainWindow):
         self.device_info = data.get("device_info", {})
         self.available_dates = data.get("available_dates", [])
         self.has_analyzed = True
-        self.btn_analyze.setText("↻ 重新分析")
+        self.btn_analyze.setToolTip("F5 重新分析")
         self.action_analyze.setText("重新分析")
         self._full_report = data.get("report_text", "")
         self._report_file = data.get("report_path")
@@ -1335,7 +1395,7 @@ class AppWindow(QMainWindow):
         self._update_file_incident_counts(
             Counter(e.get("full_path") for e in self.incidents)
         )
-        self.lbl_files.setText(f"文件 ({len(self.file_list_data)})")
+        self._sync_auxiliary_visibility()
         self.build_incident_model()
         keep_filter = self.results.currentIndex() == 2 and (
             self.match_model.search_spec is not None or not self.btn_filter.isEnabled()
@@ -1346,16 +1406,16 @@ class AppWindow(QMainWindow):
         if self.current_file is None and self.file_list_data:
             self.select_file_by_path(
                 selected_path
-                if selected_path in self.file_list_data
-                else self.file_list_data[0]
+                if selected_path in self._visible_file_paths()
+                else self._visible_file_paths()[0]
             )
         elapsed = data.get("analysis_seconds")
         tail = f" | {elapsed:.1f}s" if isinstance(elapsed, (float, int)) else ""
         errs = data.get("analysis_errors") or []
         message = (
-            f"{len(self.file_list_data)} 个文件 · "
+            f"{data.get('analyzed_file_count', len(self._visible_file_paths()))} 个日志 · "
             + (
-                f"{len(self.incidents)} 条主要原因"
+                f"{len(self.incidents)} 个定位点"
                 if self.incidents
                 else "未确认直接原因"
             )
@@ -1393,7 +1453,7 @@ class AppWindow(QMainWindow):
 
             def headerData(self, c, o, r=Qt.ItemDataRole.DisplayRole):
                 return (
-                    ["主要原因", "判断", "时间", "位置"][c]
+                    ["问题 / 事件", "判断", "时间", "位置"][c]
                     if r == Qt.ItemDataRole.DisplayRole
                     and o == Qt.Orientation.Horizontal
                     else None
@@ -1441,6 +1501,9 @@ class AppWindow(QMainWindow):
         if path not in self.file_list_data:
             return
         ix = self.file_list_data.index(path)
+        item = self.list_files.item(ix)
+        if item is not None and item.isHidden():
+            return
         if path != self.current_file:
             self._find_generation += 1
             self.find_key = None
@@ -1606,7 +1669,7 @@ class AppWindow(QMainWindow):
                 return
             paths = [self.current_file]
         else:
-            paths = self.file_list_data
+            paths = self._visible_file_paths()
         if not paths:
             return
         history_entry = {
@@ -1627,7 +1690,7 @@ class AppWindow(QMainWindow):
             self._filter_split_initialized = True
             viewer_height, results_height = self.vsplit.sizes()
             total_height = viewer_height + results_height
-            target = min(230, total_height * 45 // 100)
+            target = min(155, total_height // 4)
             if results_height < target:
                 self.vsplit.setSizes([total_height - target, target])
         self.results.setTabText(2, "筛选中...")

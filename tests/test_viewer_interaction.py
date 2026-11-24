@@ -84,6 +84,17 @@ class SelectionTests(unittest.TestCase):
         QTest.keyClick(v, Qt.Key.Key_C, Qt.KeyboardModifier.ControlModifier)
         self.assertEqual(self.app.clipboard().text(), text)
 
+    def test_single_click_body_and_gutter_select_exact_line(self):
+        v = self.viewer
+        v.set_log_text("first\r\n完整 😀 第二行\r\nthird")
+        body = self.point(1, 3)
+        gutter = QPoint(10, body.y())
+        for point in (body, gutter):
+            QTest.mouseClick(v.viewport(), Qt.MouseButton.LeftButton, pos=point)
+            self.assertEqual(v.selected_text(), "完整 😀 第二行")
+            QTest.keyClick(v, Qt.Key.Key_C, Qt.KeyboardModifier.ControlModifier)
+            self.assertEqual(self.app.clipboard().text(), "完整 😀 第二行")
+
     def test_home_end_and_crlf_arrows(self):
         v = self.viewer
         v.set_log_text("first\r\nsecond")

@@ -61,10 +61,13 @@ DEVICE_FIELD_PATTERNS = {
         re.compile(r"设备名:\s*([^|\r\n]+)", re.I),
     ],
     "眼镜SN": [
-        re.compile(r"\bSN:\s*([0-9A-Za-z_-]{6,})", re.I),
-        re.compile(r"\bmfiSerial\s*[:=]\s*([0-9A-Za-z_-]{6,})", re.I),
+        re.compile(
+            r'\b(?:mfiSerial|glassesSN|glassSerialNumber|wearableSN)["\']?\s*[:=]\s*["\']?([0-9A-Za-z_-]{6,})(?![\w*-])',
+            re.I,
+        ),
+        re.compile(r'\bSN\s*:\s*["\']?([0-9A-Za-z_-]{6,})(?![\w*-])', re.I),
         re.compile(r'["\']sn["\']\s*[:=]\s*["\']([0-9A-Za-z_-]{10,})', re.I),
-        re.compile(r"\bsn\s*[:=]\s*([0-9A-Za-z_-]{10,})", re.I),
+        re.compile(r"\bsn\s*[:=]\s*([0-9A-Za-z_-]{10,})(?![\w*-])", re.I),
     ],
     "眼镜系统版本": [
         re.compile(
@@ -107,6 +110,25 @@ DEVICE_FIELD_PATTERNS = {
         ),
     ],
 }
+
+DEVICE_SUMMARY_FIELDS = (
+    ("眼镜SN", "眼镜 SN"),
+    ("眼镜名称", "眼镜"),
+    ("App版本", "App"),
+    ("手机系统版本", "手机系统"),
+    ("RayneoNet SDK", "SDK"),
+    ("眼镜系统版本", "眼镜系统"),
+    ("手机型号", "手机"),
+)
+
+
+def format_device_summary(info, show_unknown=False):
+    essential = {"眼镜SN", "App版本", "手机系统版本", "RayneoNet SDK", "眼镜系统版本"}
+    return " · ".join(
+        f"{label} {info.get(key) or '未知'}"
+        for key, label in DEVICE_SUMMARY_FIELDS
+        if info.get(key) or (show_unknown and key in essential)
+    )
 
 
 def _clean_info_value(value: str) -> str:
@@ -360,6 +382,7 @@ def extract_device_info(files_content, reference_time=None):
     markers = {
         "手机型号": (
             "phoneModel",
+            "phone-model",
             "modelName",
             "iPhone",
             "Build.MODEL",
@@ -367,6 +390,7 @@ def extract_device_info(files_content, reference_time=None):
         ),
         "手机系统版本": (
             "phoneVersion",
+            "phone-os-version",
             "systemVersion",
             "iosVersion",
             "OS Version:",
@@ -381,7 +405,17 @@ def extract_device_info(files_content, reference_time=None):
         "App版本": ("appVersionBuild", "app_full_version", "app-version", "appVersion"),
         "RayneoNet SDK": ("sdkVersion", "RayneoNet-v"),
         "眼镜名称": ("deviceName", "设备名:"),
-        "眼镜SN": ("mfiSerial", "SN:", '"SN"', '"sn"', " sn=", "sn="),
+        "眼镜SN": (
+            "mfiSerial",
+            "glassesSN",
+            "glassSerialNumber",
+            "wearableSN",
+            "SN:",
+            '"sn"',
+            "'sn'",
+            "sn=",
+            "sn =",
+        ),
         "眼镜系统版本": (
             "deviceRomVersion",
             "firmwareVersion",
@@ -439,9 +473,13 @@ def extract_device_info(files_content, reference_time=None):
                     break
                 present.add(text_low[end - size + 1 : end + 1])
         for field in fields:
-            if glass_side and field != "眼镜系统版本":
+            if glass_side and field not in {"眼镜SN", "眼镜名称", "眼镜系统版本"}:
                 continue
             patterns = list(DEVICE_FIELD_PATTERNS.get(field, []))
+            if glass_side and field == "眼镜系统版本":
+                patterns.append(
+                    re.compile(r"\b(Strix OS\s+[0-9]+(?:\.[0-9]+){2,})", re.I)
+                )
             if not patterns:
                 continue
             priority = _device_field_source_priority(field, path)

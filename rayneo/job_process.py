@@ -368,7 +368,9 @@ def serve(directory):
                     request["range_start"],
                     request["range_end"],
                 )
-                key = windows, rules.RULES_SIGNATURE
+                auxiliary = set(request.get("auxiliary_paths", ()))
+                log_paths = [path for path in paths if path not in auxiliary]
+                key = windows, rules.RULES_SIGNATURE, tuple(log_paths)
                 cached = diagnosis_cache.get(key)
                 if cached is None:
                     last_update = 0.0
@@ -384,30 +386,34 @@ def serve(directory):
                             )
                             last_update = now
 
-                    cached = diagnose(
-                        paths,
+                    locations = []
+                    conclusions, errors, trace = diagnose(
+                        log_paths,
                         windows,
                         rules.DISABLED_RULE_NAMES,
                         progress,
                         rules.EXTERNAL_RULES,
+                        locations=locations,
                     )
+                    cached = conclusions, locations, errors, trace
                     if len(diagnosis_cache) >= 8:
                         diagnosis_cache.pop(next(iter(diagnosis_cache)))
                     diagnosis_cache[key] = cached
                     reused = False
                 else:
                     reused = True
-                incidents, errors, link_trace = cached
+                conclusions, locations, errors, link_trace = cached
                 devices = request.get("device_info") or {}
                 send(
                     "result",
                     data={
                         "source_changed": changed,
                         "file_paths": paths,
+                        "analyzed_file_count": len(log_paths),
                         "report_text": diagnosis_report(
-                            incidents, devices, errors, link_trace
+                            conclusions, devices, errors, link_trace
                         ),
-                        "incidents": incidents,
+                        "incidents": locations,
                         "device_info": devices,
                         "analysis_errors": errors,
                         "analysis_seconds": time.monotonic() - started,

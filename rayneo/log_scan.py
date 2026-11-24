@@ -4,53 +4,70 @@ from pathlib import Path
 from collections import deque
 from .device_info import _path_time_hint, extract_device_info
 from .indexing import token_automaton
-from .ingestion import _is_glasses_metadata_only, read_text_file, scan_text_file
-
-
-VERSION_MARKERS = (
-    "appversionbuild",
-    "app_full_version",
-    "app-version",
-    "appversion",
-    "sdkversion",
-    "rayneonet-v",
-    "phonemodel",
-    "modelname",
-    "build.model",
-    "ro.product.model",
-    "phoneversion",
-    "systemversion",
-    "iosversion",
-    "androidversion",
-    "harmonyversion",
-    "ohosversion",
-    "harmonyos",
-    "openharmony",
-    "ro.build.version.release",
-    "android version",
-    "os version:",
-    "devicename",
-    "mfiserial",
-    "deviceromversion",
-    "firmwareversion",
-    "firmware_version",
-    "rom_version",
-    "glasses_version",
-    "glass_os_version",
-    "os_version:",
-    "os version is",
-    "getglassosversion",
-    "软件:",
-    "small_core",
-    "strix os",
+from .ingestion import (
+    _extract_glasses_binary_metadata,
+    _is_glasses_metadata_only,
+    scan_text_file,
 )
 
 
-def candidate_lines(stream, markers):
+METADATA_GROUPS = (
+    ("appversionbuild", "app_full_version", "app-version", "appversion"),
+    ("sdkversion",),
+    ("phonemodel", "phone-model", "modelname", "build.model", "ro.product.model"),
+    (
+        "phoneversion",
+        "phone-os-version",
+        "systemversion",
+        "iosversion",
+        "androidversion",
+        "harmonyversion",
+        "ohosversion",
+        "harmonyos",
+        "openharmony",
+        "ro.build.version.release",
+        "android version",
+        "os version:",
+    ),
+    ("devicename", "设备名:"),
+    (
+        "mfiserial",
+        "glassessn",
+        "glassserialnumber",
+        "wearablesn",
+        '"sn"',
+        "'sn'",
+        "sn:",
+        "sn=",
+        "sn =",
+    ),
+    (
+        "deviceromversion",
+        "firmwareversion",
+        "firmware_version",
+        "rom_version",
+        "glasses_version",
+        "glass_os_version",
+        "os_version:",
+        "os version is",
+        "getglassosversion",
+        "软件:",
+        "small_core",
+        "strix os",
+    ),
+)
+VERSION_MARKERS = tuple(
+    dict.fromkeys(marker for group in METADATA_GROUPS for marker in group)
+)
+
+
+def candidate_lines(stream, markers, inspect_batch=None):
     markers = tuple(dict.fromkeys(marker.lower() for marker in markers))
     automaton = token_automaton(markers)
     line_base = 0
     while lines := stream.readlines(512 * 1024):
+        if inspect_batch is not None:
+            inspect_batch(line_base, lines)
         text = "".join(lines)
         lower = text.lower()
         if automaton is None or len(lower) != len(text):
@@ -89,24 +106,52 @@ def read_versions(paths):
     metadata = [p for *_, p in ranked if _is_glasses_metadata_only(p)]
     metadata_set = set(metadata)
     logs = [p for *_, p in sorted(ranked, reverse=True) if p not in metadata_set]
-    # Select recent device sources first, then older logs if version fields
-    # are missing. The samples never retain complete log files.
+    # Keep separate allowances for metadata and phone logs in mixed archives.
+    text_sources = sdk_only = 0
     for path in metadata[:24] + logs:
         try:
 
             def sample(stream):
-                lines = deque(maxlen=240)
-                for _, line in candidate_lines(stream, VERSION_MARKERS):
-                    lines.append(line[:2000])
-                return "\n".join(lines)
+                groups = [deque(maxlen=48) for _ in METADATA_GROUPS]
+                sdk = deque(maxlen=2)
 
-            text = scan_text_file(path, sample)
-            if text is None and _is_glasses_metadata_only(path):
-                text = read_text_file(path)
+                def inspect_batch(base, lines):
+                    # RayNeoNet prefixes recur on every SDK log line. Sample
+                    # them separately so versions and SN are never pushed out.
+                    edges = list(enumerate(lines[:8], base)) if base == 0 else []
+                    edges.extend(enumerate(lines[-8:], base + max(0, len(lines) - 8)))
+                    for number, line in edges:
+                        if "rayneonet-v" in line.lower():
+                            sdk.append((number, line.rstrip("\n")[:2000]))
+
+                for number, line in candidate_lines(
+                    stream, VERSION_MARKERS, inspect_batch
+                ):
+                    lower = line.lower()
+                    for terms, group in zip(METADATA_GROUPS, groups):
+                        if any(term in lower for term in terms):
+                            group.append((number, line[:2000]))
+                entries = dict(entry for group in groups for entry in group)
+                explicit = bool(entries)
+                entries.update(sdk)
+                return "\n".join(text for _, text in sorted(entries.items())), explicit
+
+            result = scan_text_file(path, sample)
+            if (result is None or not result[0]) and path in metadata_set:
+                result = (_extract_glasses_binary_metadata(path), True)
         except OSError:
             continue
-        if text:
+        if result is None or not result[0]:
+            continue
+        text, explicit = result
+        if path in metadata_set:
             sources[path] = text
-        if len(sources) >= 24:
-            break
+        elif explicit:
+            sources[path] = text
+            text_sources += 1
+            if text_sources >= 24:
+                break
+        elif sdk_only < 8:
+            sources[path] = text
+            sdk_only += 1
     return extract_device_info(sources)

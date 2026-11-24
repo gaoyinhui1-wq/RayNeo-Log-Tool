@@ -4,6 +4,7 @@ import re
 from collections import OrderedDict
 from datetime import timedelta
 from pathlib import Path
+from .device_info import format_device_summary
 
 
 LINK_MARKERS = (
@@ -122,7 +123,11 @@ class LinkTimeline:
             and abs(acl_event["line"] - link_event["line"]) <= 3
             and abs(acl_event["time"] - link_event["time"]) <= timedelta(seconds=2)
         ):
-            details = {**link_event, "text": "BLE ACL 已连上，RNLink 还是 0。"}
+            details = {
+                **link_event,
+                "stage": "gap",
+                "text": "BLE ACL 已连上，RNLink 还是 0。",
+            }
             lane["gap"] = (
                 [details, acl_event]
                 if acl_event["line"] != link_event["line"]
@@ -170,11 +175,22 @@ class LinkTimeline:
 
 def diagnosis_report(items, devices, errors=(), link_trace=None):
     groups = list(link_trace[0]) if link_trace else []
+    if link_trace:
+        evidence = next(group for group in groups if group[0].get("stage") == "gap")
+        if len(evidence) == 1 and link_trace[1]:
+            evidence = evidence + groups[-1][:1]
+    else:
+        evidence = []
     for item in items:
         event = item.get("event") or note(
             item["time"], item["full_path"], item["line"], item["custom_analysis"]
         )
-        groups.extend(item.get("steps") or [[event]])
+        steps = item.get("steps") or [[event]]
+        groups.extend(steps)
+        evidence.append(steps[0][0])
+        if len(items) == 1 and len(steps) > 1:
+            evidence.append(steps[-1][0])
+    evidence_locations = {(event["path"], event["line"]) for event in evidence[:2]}
     groups.sort(
         key=lambda group: (
             group[0]["time"] is None,
@@ -191,6 +207,10 @@ def diagnosis_report(items, devices, errors=(), link_trace=None):
         prefix = lead["time"].strftime(stamp) + " " if lead["time"] else ""
         references = []
         for event in sorted(group, key=lambda event: (event["path"], event["line"])):
+            key = (event["path"], event["line"])
+            if key not in evidence_locations:
+                continue
+            evidence_locations.discard(key)
             location = f"{Path(event['path']).name}:{event['line'] + 1}"
             references.append(
                 f"  {location}" + (f"  {event['raw']}" if event["raw"] else "")
@@ -200,15 +220,7 @@ def diagnosis_report(items, devices, errors=(), link_trace=None):
         blocks.append("这段卡在 RNLink 建链，原因待确认。")
     elif not groups:
         blocks.append("这段日志里没有看到能确认原因的记录。")
-    labels = (
-        ("App版本", "App"),
-        ("手机系统版本", "手机系统"),
-        ("RayneoNet SDK", "SDK"),
-        ("眼镜系统版本", "眼镜系统"),
-    )
-    versions = " · ".join(
-        f"{label} {devices[key]}" for key, label in labels if devices.get(key)
-    )
+    versions = format_device_summary(devices)
     if versions:
         blocks.append(versions)
     if errors:

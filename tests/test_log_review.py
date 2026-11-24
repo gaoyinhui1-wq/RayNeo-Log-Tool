@@ -159,6 +159,10 @@ class ReviewUiTests(GuiCase):
         positions = [report.index(fragment) for fragment in sequence]
         self.assertEqual(positions, sorted(positions))
         self.assertIn("combined.log:4  rnlink:0", report)
+        self.assertEqual(
+            sum(line.startswith("  combined.log:") for line in report.splitlines()), 2
+        )
+        self.assertGreater(self.win.tbl_incidents.model().rowCount(), 2)
         self.assertEqual(self.win.results.currentIndex(), 0)
         self.win.show_report()
         self.assertEqual(self.win._report_view.toPlainText(), report)
@@ -175,21 +179,61 @@ class ReviewUiTests(GuiCase):
         text_path = self.root / "a.log"
         text_path.write_text(
             "2026-04-01 12:00:00 appVersion=1.2.3, sdkVersion=v4.5.6, iosVersion=18.4\n"
-            "2026-04-02 12:00:00 appVersion=1.2.4\n",
+            "2026-04-02 12:00:00 appVersion=1.2.4, mfiSerial=RAYSN123456\n"
+            + "2026-04-02 12:01:00 RayneoNet-v4.5.6 heartbeat\n"
+            * 450,
             encoding="utf-8",
         )
         binary = self.root / "b.bin"
         binary.write_bytes(b"\x00\xffABCDEFG\x00\x02\xfe")
-        self.load(text_path, binary)
+        metadata = self.root / "versions.rev"
+        metadata.write_bytes(b"\x00\xff\x00Strix OS 1.0.6.14\x00\x01\x00")
+        self.load(text_path, binary, metadata)
         self.assertFalse(self.win.has_analyzed)
         self.assertEqual(self.win.device_info["App版本"], "1.2.4")
         self.assertIn("SDK v4.5.6", self.win.device_bar.text())
         self.assertIn("手机系统 18.4", self.win.device_bar.text())
+        self.assertIn("眼镜 SN RAYSN123456", self.win.device_bar.text())
+        self.assertEqual(self.win.device_info["眼镜系统版本"], "Strix OS 1.0.6.14")
+        self.assertTrue(self.win.list_files.item(1).isHidden())
+        self.assertTrue(self.win.list_files.item(2).isHidden())
+        self.win.action_show_auxiliary.setChecked(True)
+        self.assertFalse(self.win.list_files.item(1).isHidden())
         self.win.select_file_by_path(str(binary))
         self.wait(lambda: self.win.file_read_worker is None)
         self.assertIn(r"\x00 \xff \x41", self.win.viewer._log)
         self.assertTrue(self.win.action_binary_export.isEnabled())
         self.assertFalse(self.win.btn_edit_log.isEnabled())
+        self.win.action_show_auxiliary.setChecked(False)
+        self.assertEqual(self.win.current_file, str(text_path))
+        self.assertFalse(
+            self.win.tabs.isTabVisible(self.win._tab_paths.index(str(binary)))
+        )
+        self.win.reanalyze()
+        self.wait(lambda: not self.win._busy() and self.win.has_analyzed)
+        self.assertIn("眼镜 SN RAYSN123456", self.win.txt_analysis.toPlainText())
+        self.assertIn("眼镜系统 Strix OS 1.0.6.14", self.win.txt_analysis.toPlainText())
+
+    def test_detailed_locations_are_separate_from_the_compact_report(self):
+        source = self.root / "events.log"
+        source.write_text(
+            "2026-04-01 12:00:00 Bluetooth stack crashed\n"
+            "2026-04-01 12:00:01 HCI Hardware Error\n"
+            "2026-04-01 12:00:02 NotificationListenerService permission denied\n"
+            "2026-04-01 12:02:00 Bluetooth stack crashed\n",
+            encoding="utf-8",
+        )
+        self.load(source)
+        self.win.reanalyze()
+        self.wait(lambda: self.win.has_analyzed and not self.win._busy())
+        self.assertEqual(
+            [item["line"] for item in self.win.incident_rows], [0, 1, 2, 3]
+        )
+        report = self.win.txt_analysis.toPlainText()
+        self.assertEqual(
+            sum(line.startswith("  events.log:") for line in report.splitlines()), 2
+        )
+        self.assertNotIn("权限请求被拒绝", report)
 
     def test_recommendation_and_filter_options_are_saved_as_history(self):
         source = self.root / "events.log"

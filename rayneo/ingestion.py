@@ -693,11 +693,8 @@ def _extract_glasses_binary_metadata(path: str):
         chunks = []
         seen = set()
 
-        for raw in re.findall(rb"[\x20-\x7e]{4,240}", data):
-            try:
-                text = raw.decode("utf-8", errors="ignore").strip()
-            except Exception:
-                continue
+        for match in re.finditer(rb"[\x20-\x7e]{4,240}", data):
+            text = match[0].decode("ascii").strip()
             if not text:
                 continue
             low = text.lower()
@@ -714,6 +711,10 @@ def _extract_glasses_binary_metadata(path: str):
                     "gatt",
                     "bond",
                     "mfi",
+                    "sn:",
+                    "sn=",
+                    '"sn"',
+                    "serialnumber",
                 )
             ):
                 continue

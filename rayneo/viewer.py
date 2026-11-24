@@ -366,6 +366,10 @@ class VirtualLogViewer(QAbstractScrollArea):
         self._anchor = 0
         self._move_to(len(self._log), extend=True, reveal=False)
 
+    def select_current_line(self):
+        self._anchor = self._starts[self._line]
+        self._move_to(self._line_end(self._line), extend=True, reveal=False)
+
     def _move_to(self, position, extend=False, reveal=True):
         self._cursor = min(len(self._log), max(0, int(position)))
         if not extend:
@@ -520,6 +524,10 @@ class VirtualLogViewer(QAbstractScrollArea):
             self.setFocus()
             self._dragging = True
             self._drag_pos = event.position().toPoint()
+            self._drag_origin = self._drag_pos
+            self._click_selects_line = not bool(
+                event.modifiers() & Qt.KeyboardModifier.ShiftModifier
+            )
             self._move_to(
                 self._offset_at(self._drag_pos),
                 extend=bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier),
@@ -532,6 +540,8 @@ class VirtualLogViewer(QAbstractScrollArea):
     def mouseMoveEvent(self, event):
         if self._dragging:
             self._drag_pos = event.position().toPoint()
+            if self._drag_pos != self._drag_origin:
+                self._click_selects_line = False
             self._move_to(self._offset_at(self._drag_pos), extend=True, reveal=False)
             if self.viewport().rect().contains(self._drag_pos):
                 self._drag_timer.stop()
@@ -543,9 +553,11 @@ class VirtualLogViewer(QAbstractScrollArea):
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and self._dragging:
-            self._move_to(
-                self._offset_at(event.position().toPoint()), extend=True, reveal=False
-            )
+            position = event.position().toPoint()
+            if self._click_selects_line and position == self._drag_origin:
+                self.select_current_line()
+            else:
+                self._move_to(self._offset_at(position), extend=True, reveal=False)
             self._dragging = False
             self._drag_timer.stop()
             event.accept()
@@ -615,6 +627,9 @@ class VirtualLogViewer(QAbstractScrollArea):
         copy_action = menu.addAction("复制\tCtrl+C", self.copy)
         copy_action.setEnabled(bool(self._log))
         menu.addAction("复制当前行", self.copy_current_line).setEnabled(bool(self._log))
+        menu.addAction("选中当前行", self.select_current_line).setEnabled(
+            bool(self._log)
+        )
         menu.addSeparator()
         menu.addAction("全选\tCtrl+A", self.select_all).setEnabled(bool(self._log))
         menu.exec(event.globalPos())

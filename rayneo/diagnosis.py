@@ -192,7 +192,9 @@ def _trace_time(line, logcat_year):
         return None
 
 
-def scan_causes(path, windows, disabled=(), prioritized=(), traces=None):
+def scan_causes(
+    path, windows, disabled=(), prioritized=(), traces=None, locations=None
+):
     is_glasses = _is_glasses_side_path(path)
     file_name = Path(path).name
     date_hint, _ = _path_time_hint(path)
@@ -221,6 +223,7 @@ def scan_causes(path, windows, disabled=(), prioritized=(), traces=None):
 
     def scan(stream):
         found = {}
+        points = {}
         lanes = OrderedDict()
         notifications, ancs_failures = OrderedDict(), OrderedDict()
         process = fatal = crash_time = None
@@ -250,8 +253,14 @@ def scan_causes(path, windows, disabled=(), prioritized=(), traces=None):
             if not in_scope(time) or name in disabled:
                 return
             previous = found.get(code)
-            if previous is None or priority > previous["priority"]:
-                found[code] = {
+            primary = previous is None or priority > previous["priority"]
+            minute = time.replace(second=0, microsecond=0) if time is not None else None
+            point_key = (code, device, minute)
+            detailed = (
+                locations is not None and len(points) < 120 and point_key not in points
+            )
+            if primary or detailed:
+                item = {
                     "rule_id": code,
                     "priority": priority,
                     "name": name,
@@ -271,6 +280,10 @@ def scan_causes(path, windows, disabled=(), prioritized=(), traces=None):
                     ),
                     "steps": steps,
                 }
+                if primary:
+                    found[code] = item
+                if detailed:
+                    points[point_key] = item
 
         def crashed(label, number, time, raw=""):
             if BT_PROCESS.fullmatch(label) and not is_glasses:
@@ -478,6 +491,19 @@ def scan_causes(path, windows, disabled=(), prioritized=(), traces=None):
                     and abs((time - weak["time"]).total_seconds()) <= 10
                 ):
                     found.pop("weak_signal")
+                if locations is not None:
+                    for t in (
+                        time - timedelta(seconds=10),
+                        time + timedelta(seconds=10),
+                    ):
+                        key = (
+                            "weak_signal",
+                            device,
+                            t.replace(second=0, microsecond=0),
+                        )
+                        point = points.get(key)
+                        if point and abs((time - point["time"]).total_seconds()) <= 10:
+                            points.pop(key)
                 continue
             rssi = RSSI_RE.search(line)
             if rssi and LINK_RSSI.search(line) and -108 <= int(rssi[1]) <= -20:
@@ -569,11 +595,24 @@ def scan_causes(path, windows, disabled=(), prioritized=(), traces=None):
             for code in ("weak_signal", "environment"):
                 if code in found and not found[code]["device_id"]:
                     del found[code]
-        return list(found.values()), link.result(len(named) > 1) if link else None
+        if len(named) > 1:
+            points = {
+                key: item
+                for key, item in points.items()
+                if item["device_id"]
+                or item["rule_id"] not in {"weak_signal", "environment"}
+            }
+        return (
+            list(found.values()),
+            link.result(len(named) > 1) if link else None,
+            list(points.values()),
+        )
 
-    items, trace = scan_text_file(path, scan) or ([], None)
+    items, trace, points = scan_text_file(path, scan) or ([], None, [])
     if trace and traces is not None:
         traces.append(trace)
+    if locations is not None:
+        locations.extend(points)
     return items
 
 
@@ -614,7 +653,7 @@ def select_causes(candidates):
     return selected
 
 
-def diagnose(paths, windows, disabled, progress, external_rules=()):
+def diagnose(paths, windows, disabled, progress, external_rules=(), *, locations=None):
     candidates, errors = [], []
     traces = []
     prioritized = [
@@ -628,7 +667,9 @@ def diagnose(paths, windows, disabled, progress, external_rules=()):
     for idx, path in enumerate(paths, 1):
         progress(idx, len(paths), Path(path).name)
         try:
-            candidates.extend(scan_causes(path, windows, disabled, prioritized, traces))
+            candidates.extend(
+                scan_causes(path, windows, disabled, prioritized, traces, locations)
+            )
         except OSError as exc:
             errors.append(f"{Path(path).name}：{exc}")
     selected = select_causes(candidates)
@@ -637,4 +678,38 @@ def diagnose(paths, windows, disabled, progress, external_rules=()):
         if selected
         else max(traces, key=lambda trace: (trace[1], len(trace[0])), default=None)
     )
+    if locations is not None:
+        points = {}
+        for item in sorted(
+            candidates + locations,
+            key=lambda x: (
+                -x["priority"],
+                x["time"] or datetime.min,
+                x["full_path"],
+                x["line"],
+            ),
+        ):
+            points.setdefault((item["full_path"], item["line"]), item)
+            if len(points) >= 200:
+                break
+        if link_trace:
+            for group in link_trace[0]:
+                event = group[0]
+                points.setdefault(
+                    (event["path"], event["line"]),
+                    {
+                        "full_path": event["path"],
+                        "file": Path(event["path"]).name,
+                        "line": event["line"],
+                        "time": event["time"],
+                        "status": "时序",
+                        "rule_id": "rnlink_timeline",
+                        "name": event["text"].rstrip("。"),
+                        "custom_analysis": event["text"],
+                    },
+                )
+        locations[:] = sorted(
+            points.values(),
+            key=lambda x: (x["time"] is None, x["time"], x["full_path"], x["line"]),
+        )
     return selected, errors, link_trace
